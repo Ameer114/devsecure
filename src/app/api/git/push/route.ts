@@ -252,7 +252,9 @@ export async function POST(req: Request) {
       folder: cwd,
       pushedToRemote,
       deployment: deployResult.deployment,
-      message: `Security scan passed! Pushed to GitHub and deployed to Cloud (${deployResult.deployment?.environment || "production"}).`,
+      message: deployResult.ok
+        ? (deployResult.message || `Security scan passed! Pushed to GitHub and deployed to Cloud (${deployResult.deployment?.environment || "production"}).`)
+        : `Security scan passed & pushed to GitHub, but Cloud Deployment was not completed: ${deployResult.message}`,
     });
   } catch (err) {
     logger.error("Failed to run CI/CD pipeline", { err });

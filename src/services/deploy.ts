@@ -32,38 +32,51 @@ export async function triggerCloudDeployment(params: {
 }): Promise<{ ok: boolean; message: string; deployment?: DeploymentRecord }> {
   const { repoId, repoFullName, runId, commitSha, branch, config } = params;
   const env = config?.environment || "production";
-  const provider = config?.provider || "cloud";
+  const provider = config?.provider || "aws";
 
   let remoteDeployed = false;
-  let deployDetails = "Local build and deployment verification succeeded.";
+  let deployDetails = "";
+  let isSuccess = false;
+  let statusMessage = "";
 
   // 1. Direct AWS EC2 Deployment via SSH
-  if (config?.provider === "aws" && config.ec2Host?.trim()) {
-    const host = config.ec2Host.trim();
-    const user = config.ec2User?.trim() || "ubuntu";
-    const keyPath = config.ec2KeyPath?.trim() || "";
-    const appDir = config.ec2AppDir?.trim() || "/home/ubuntu/app";
-    const runCmd = config.ec2Command?.trim() || "git pull && npm install && npm run build && pm2 restart all";
+  if (provider === "aws") {
+    if (!config?.ec2Host?.trim()) {
+      isSuccess = false;
+      statusMessage = "AWS EC2 Host IP is not configured. Go to Configuration page and enter your EC2 Public IPv4 address.";
+      deployDetails = statusMessage;
+    } else {
+      const host = config.ec2Host.trim();
+      const user = config.ec2User?.trim() || "ec2-user";
+      const keyPath = config.ec2KeyPath?.trim() || "";
+      const appDir = config.ec2AppDir?.trim() || "/home/ec2-user/app";
+      const runCmd = config.ec2Command?.trim() || "git pull && npm install && npm run build && pm2 restart all";
 
-    const remoteScript = `cd "${appDir}" && ${runCmd}`;
-    const sshArgs: string[] = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"];
-    if (keyPath) {
-      sshArgs.push("-i", keyPath);
-    }
-    sshArgs.push(`${user}@${host}`, remoteScript);
+      const remoteScript = `cd "${appDir}" && ${runCmd}`;
+      const sshArgs: string[] = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"];
+      if (keyPath) {
+        sshArgs.push("-i", keyPath);
+      }
+      sshArgs.push(`${user}@${host}`, remoteScript);
 
-    try {
-      const { stdout, stderr } = await execFileAsync("ssh", sshArgs);
-      remoteDeployed = true;
-      deployDetails = `Connected via SSH to AWS EC2 (${user}@${host}). Output: ${(stdout || stderr).trim()}`;
-    } catch (sshErr) {
-      const errMsg = sshErr instanceof Error ? sshErr.message : String(sshErr);
-      logger.warn("AWS EC2 SSH deploy failed", { errMsg });
-      deployDetails = `EC2 SSH failed: ${errMsg}. Check that Port 22 is open in AWS Security Group and PEM key path is valid.`;
+      try {
+        const { stdout, stderr } = await execFileAsync("ssh", sshArgs);
+        remoteDeployed = true;
+        isSuccess = true;
+        const sshOutput = (stdout || stderr).trim();
+        statusMessage = `Successfully deployed to AWS EC2 (${user}@${host}). Output: ${sshOutput.slice(0, 300)}`;
+        deployDetails = statusMessage;
+      } catch (sshErr) {
+        isSuccess = false;
+        const errMsg = sshErr instanceof Error ? sshErr.message : String(sshErr);
+        logger.warn("AWS EC2 SSH deploy failed", { errMsg });
+        statusMessage = `AWS EC2 SSH failed: ${errMsg}. Check that Port 22 is open in AWS Security Group and PEM key path is valid.`;
+        deployDetails = statusMessage;
+      }
     }
   }
 
-  // 2. Or Cloud Webhook / Deploy Hook URL (e.g. Vercel, Railway, AWS Webhook)
+  // 2. Cloud Webhook / Deploy Hook URL (e.g. Vercel, Railway, AWS Webhook)
   else if (config?.webhookUrl?.trim()) {
     try {
       const headers: Record<string, string> = {
@@ -89,16 +102,26 @@ export async function triggerCloudDeployment(params: {
 
       if (res.ok) {
         remoteDeployed = true;
-        deployDetails = `Triggered ${provider.toUpperCase()} cloud deployment webhook successfully.`;
+        isSuccess = true;
+        statusMessage = `Triggered ${provider.toUpperCase()} cloud deployment webhook successfully.`;
+        deployDetails = statusMessage;
       } else {
+        isSuccess = false;
         const body = await res.text().catch(() => "");
-        logger.warn("Cloud deploy webhook returned non-200", { status: res.status, body });
-        deployDetails = `Cloud webhook returned status ${res.status}. Recorded deployment locally.`;
+        statusMessage = `Cloud webhook returned status ${res.status}: ${body.slice(0, 150)}`;
+        deployDetails = statusMessage;
       }
     } catch (err) {
-      logger.error("Failed to call cloud deployment webhook", { err });
-      deployDetails = "Failed to reach cloud deployment webhook endpoint. Recorded deployment locally.";
+      isSuccess = false;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      statusMessage = `Failed to reach cloud deployment webhook endpoint: ${errMsg}`;
+      deployDetails = statusMessage;
     }
+  } else {
+    // No cloud target configured
+    isSuccess = true;
+    statusMessage = "Local security release gate passed. No cloud deployment target was configured.";
+    deployDetails = statusMessage;
   }
 
   // 3. Register deployment record in store
@@ -110,12 +133,12 @@ export async function triggerCloudDeployment(params: {
     environment: env,
     imageRef: remoteDeployed
       ? config?.provider === "aws" && config.ec2Host
-        ? `ec2://${config.ec2User || "ubuntu"}@${config.ec2Host}:${shortSha}`
+        ? `ec2://${config.ec2User || "ec2-user"}@${config.ec2Host}:${shortSha}`
         : `${provider}://${repoFullName}:${shortSha}`
-      : `cloud-release://${repoFullName}:${shortSha}`,
+      : `release://${repoFullName}:${shortSha}`,
     imageDigest: `sha256:${commitSha}`,
-    status: "SUCCEEDED",
-    healthCheckOk: true,
+    status: isSuccess && remoteDeployed ? "SUCCEEDED" : isSuccess && !config?.ec2Host && !config?.webhookUrl ? "SUCCEEDED" : "FAILED",
+    healthCheckOk: isSuccess && remoteDeployed,
     startedAt: new Date(Date.now() - 2000),
     finishedAt: new Date(),
     repository: { fullName: repoFullName, isDemo: false },
@@ -126,7 +149,7 @@ export async function triggerCloudDeployment(params: {
   // 4. Record audit trail
   await recordAudit({
     actor: "ci-cd-pipeline",
-    action: "deployment.succeeded",
+    action: isSuccess ? "deployment.succeeded" : "deployment.failed",
     entityType: "Deployment",
     entityId: deployment.id,
     repositoryId: repoId,
@@ -141,12 +164,8 @@ export async function triggerCloudDeployment(params: {
   });
 
   return {
-    ok: true,
-    message: remoteDeployed
-      ? config?.provider === "aws" && config.ec2Host
-        ? `Deployed to AWS EC2 (${config.ec2Host}) for commit ${shortSha}!`
-        : `Deployed to ${provider.toUpperCase()} (${env}) for commit ${shortSha}!`
-      : `Security gate cleared. Verified deployment ${shortSha} for ${env}.`,
+    ok: isSuccess && (remoteDeployed || (!config?.ec2Host && !config?.webhookUrl)),
+    message: statusMessage,
     deployment,
   };
 }
