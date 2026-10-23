@@ -1,0 +1,16 @@
+# Local PostgreSQL only. Not verified in the authoring sandbox (no Docker available there).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: secureship
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: secureship
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secureship"]
+      interval: 5s
+      retries: 10
+volumes:
+  pgdata:

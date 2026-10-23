@@ -1,0 +1,63 @@
+@import "tailwindcss";
+@import "@fontsource-variable/schibsted-grotesk";
+@import "@fontsource-variable/jetbrains-mono";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --bg: #edf1f3;
+  --surface: #f8fafb;
+  --ink: #0f2230;
+  --muted: #566a78;
+  --line: #d3dce2;
+  --accent: #0e6b73;
+  --ok: #26703f;
+  --warn: #8f5a0a;
+  --bad: #b3281f;
+  --info: #2f5f99;
+}
+.dark {
+  --bg: #0a1822;
+  --surface: #10212d;
+  --ink: #e4edf2;
+  --muted: #93a7b4;
+  --line: #213645;
+  --accent: #5cbcc4;
+  --ok: #62c18b;
+  --warn: #e3a950;
+  --bad: #f08a82;
+  --info: #86b0e0;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-info: var(--info);
+  --font-sans: "Schibsted Grotesk Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, monospace;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
