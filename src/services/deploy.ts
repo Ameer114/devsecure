@@ -48,23 +48,39 @@ export async function triggerCloudDeployment(params: {
       deployDetails = statusMessage;
     } else {
       const host = config.ec2Host.trim();
-      const user = config.ec2User?.trim() || "ec2-user";
-      const keyPath = config.ec2KeyPath?.trim() || "";
-      const appDir = config.ec2AppDir?.trim() || "/home/ec2-user/app";
+      let user = config.ec2User?.trim() || "ec2-user";
+      // Auto-correct common user error: entering "Linux/UNIX" or "Linux" copied from AWS EC2 console
+      if (/^(linux\/unix|linux|unix)$/i.test(user)) {
+        user = "ec2-user";
+      }
+
+      let keyPath = config.ec2KeyPath?.trim() || "";
+      // Strip surrounding quotes if copied as path from Windows Explorer
+      keyPath = keyPath.replace(/^["']+|["']+$/g, "");
+
+      let appDir = config.ec2AppDir?.trim() || (user === "ubuntu" ? "/home/ubuntu/app" : "/home/ec2-user/app");
+      // Prevent permission denied if ec2-user tries to write to /home/ubuntu or vice versa
+      if (user === "ec2-user" && appDir.startsWith("/home/ubuntu")) {
+        appDir = appDir.replace("/home/ubuntu", "/home/ec2-user");
+      } else if (user === "ubuntu" && appDir.startsWith("/home/ec2-user")) {
+        appDir = appDir.replace("/home/ec2-user", "/home/ubuntu");
+      }
+
       const targetRepoUrl = repoUrl?.trim() || (repoFullName ? `https://github.com/${repoFullName}.git` : "");
 
       // Fully automated bootstrapping:
-      // 1. Automatically create directory (mkdir -p) so user never has to create it manually
+      // 0. Auto-install git & nodejs if not yet present on remote instance
+      // 1. Automatically create directory (mkdir -p)
       // 2. Automatically clone repo if first run, or pull latest code if already cloned
       // 3. Build & start/restart application
-      const autoBootstrapCmd = `mkdir -p "${appDir}" && cd "${appDir}" && (if [ ! -d .git ]; then ${targetRepoUrl ? `git clone "${targetRepoUrl}" .` : `git init`}; else ${targetRepoUrl ? `git remote set-url origin "${targetRepoUrl}" 2>/dev/null || true;` : ""} git fetch origin 2>/dev/null || true; git checkout "${branch}" 2>/dev/null || true; git pull origin "${branch}" 2>/dev/null || true; fi) && (if [ -f package.json ]; then npm install && npm run build --if-present && (command -v pm2 >/dev/null 2>&1 && (pm2 restart all || pm2 start npm --name "app" -- start) || (npm run start &)); fi)`;
+      const autoBootstrapCmd = `(command -v git >/dev/null 2>&1 || (sudo dnf install -y git 2>/dev/null || sudo yum install -y git 2>/dev/null || (sudo apt-get update -y && sudo apt-get install -y git) 2>/dev/null || true)) && (command -v node >/dev/null 2>&1 || (sudo dnf install -y nodejs 2>/dev/null || sudo yum install -y nodejs 2>/dev/null || (sudo apt-get update -y && sudo apt-get install -y nodejs npm) 2>/dev/null || true)) && mkdir -p "${appDir}" && cd "${appDir}" && (if [ ! -d .git ]; then ${targetRepoUrl ? `git clone "${targetRepoUrl}" .` : `git init`}; else ${targetRepoUrl ? `git remote set-url origin "${targetRepoUrl}" 2>/dev/null || true;` : ""} git fetch origin 2>/dev/null || true; git checkout "${branch}" 2>/dev/null || true; git pull origin "${branch}" 2>/dev/null || true; fi) && (if [ -f package.json ]; then npm install && npm run build --if-present && (command -v pm2 >/dev/null 2>&1 && (pm2 restart all || pm2 start npm --name "app" -- start) || (npm run start &)); fi)`;
 
       const customCmd = config.ec2Command?.trim();
       const remoteScript = customCmd && !customCmd.startsWith("git pull")
         ? `mkdir -p "${appDir}" && cd "${appDir}" && ${customCmd}`
         : autoBootstrapCmd;
 
-      const sshArgs: string[] = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"];
+      const sshArgs: string[] = ["-n", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"];
       if (keyPath) {
         sshArgs.push("-i", keyPath);
       }
@@ -84,8 +100,10 @@ export async function triggerCloudDeployment(params: {
 
         if (errMsg.includes("timed out") || errMsg.includes("Connection timed out")) {
           statusMessage = `AWS EC2 Connection Timed Out on Port 22 (${host}). Action Required: In AWS EC2 Console -> Security Groups -> Edit Inbound Rules -> Add Port 22 (SSH) from "Anywhere-IPv4" (0.0.0.0/0) or "My IP".`;
+        } else if (errMsg.includes("not accessible: No such file or directory")) {
+          statusMessage = `AWS EC2 Key (.pem) file not accessible on this machine: "${keyPath}". Please check the path and ensure there are no extra quotes.`;
         } else if (errMsg.includes("Permission denied") || errMsg.includes("Host key verification failed")) {
-          statusMessage = `AWS EC2 SSH Authentication Failed. Check that your .pem key path is correct on your computer and the SSH user is "${user}".`;
+          statusMessage = `AWS EC2 SSH Authentication Failed. Check that your .pem key path is correct and the SSH user is "${user}". (Tip: Use 'ec2-user' for Amazon Linux or 'ubuntu' for Ubuntu. Do not use 'Linux/UNIX').`;
         } else {
           statusMessage = `AWS EC2 SSH failed: ${errMsg}. Check that Port 22 is open in AWS Security Group and PEM key path is valid.`;
         }

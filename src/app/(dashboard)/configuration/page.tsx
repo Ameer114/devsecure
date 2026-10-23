@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { CheckCircle2, Cloud, Eye, EyeOff, Folder, FolderGit2, KeyRound, Mail, Rocket, Server, ShieldCheck, Terminal, Trash2, UploadCloud } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Cloud, Eye, EyeOff, Folder, FolderGit2, KeyRound, Loader2, Mail, Rocket, Server, ShieldCheck, Terminal, Trash2, UploadCloud } from "lucide-react";
 import { PageHeader } from "@/components/ui";
 
 export default function ConfigurationPage() {
@@ -19,10 +19,19 @@ export default function ConfigurationPage() {
 
   // AWS EC2 specific state
   const [ec2Host, setEc2Host] = useState("");
-  const [ec2User, setEc2User] = useState("ubuntu");
+  const [ec2User, setEc2User] = useState("ec2-user");
   const [ec2KeyPath, setEc2KeyPath] = useState("");
-  const [ec2AppDir, setEc2AppDir] = useState("/home/ubuntu/app");
+  const [ec2AppDir, setEc2AppDir] = useState("/home/ec2-user/app");
   const [ec2Command, setEc2Command] = useState("git pull && npm install && npm run build && pm2 restart all");
+
+  // EC2 Connection Test state
+  const [isTestingEc2, setIsTestingEc2] = useState(false);
+  const [ec2TestResult, setEc2TestResult] = useState<{
+    ok: boolean;
+    message: string;
+    output?: string;
+    suggestion?: string;
+  } | null>(null);
 
   // Push / Pipeline tool state
   const [commitMessage, setCommitMessage] = useState("feat: sync and deploy from SecureShip CI/CD");
@@ -110,6 +119,16 @@ export default function ConfigurationPage() {
     if (e) e.preventDefault();
     if (typeof window === "undefined") return;
 
+    const cleanKeyPath = ec2KeyPath.replace(/^["']+|["']+$/g, "").trim();
+    let cleanUser = ec2User.trim() || "ec2-user";
+    if (/^(linux\/unix|linux|unix)$/i.test(cleanUser)) {
+      cleanUser = "ec2-user";
+      setEc2User("ec2-user");
+    }
+    if (cleanKeyPath !== ec2KeyPath) {
+      setEc2KeyPath(cleanKeyPath);
+    }
+
     localStorage.setItem("secureship_groq_key", groqKey.trim());
     localStorage.setItem("secureship_local_folder", localFolder.trim());
     localStorage.setItem("secureship_github_repo", githubRepo.trim());
@@ -122,8 +141,8 @@ export default function ConfigurationPage() {
     localStorage.setItem("secureship_cloud_env", cloudEnv.trim());
 
     localStorage.setItem("secureship_ec2_host", ec2Host.trim());
-    localStorage.setItem("secureship_ec2_user", ec2User.trim());
-    localStorage.setItem("secureship_ec2_keypath", ec2KeyPath.trim());
+    localStorage.setItem("secureship_ec2_user", cleanUser);
+    localStorage.setItem("secureship_ec2_keypath", cleanKeyPath);
     localStorage.setItem("secureship_ec2_appdir", ec2AppDir.trim());
     localStorage.setItem("secureship_ec2_command", ec2Command.trim());
 
@@ -159,18 +178,82 @@ export default function ConfigurationPage() {
     setCloudToken("");
     setCloudEnv("production");
     setEc2Host("");
-    setEc2User("ubuntu");
+    setEc2User("ec2-user");
     setEc2KeyPath("");
-    setEc2AppDir("/home/ubuntu/app");
+    setEc2AppDir("/home/ec2-user/app");
     setEc2Command("git pull && npm install && npm run build && pm2 restart all");
+    setEc2TestResult(null);
     setSavedStatus("Cleared all frontend configuration.");
     setTimeout(() => setSavedStatus(null), 3500);
+  }
+
+  async function handleTestEc2() {
+    setIsTestingEc2(true);
+    setEc2TestResult(null);
+
+    const cleanHost = ec2Host.trim();
+    const cleanKeyPath = ec2KeyPath.replace(/^["']+|["']+$/g, "").trim();
+    let cleanUser = ec2User.trim() || "ec2-user";
+    if (/^(linux\/unix|linux|unix)$/i.test(cleanUser)) {
+      cleanUser = "ec2-user";
+      setEc2User("ec2-user");
+    }
+
+    if (!cleanHost) {
+      setEc2TestResult({
+        ok: false,
+        message: "Please enter your EC2 Public IP / Host DNS first.",
+      });
+      setIsTestingEc2(false);
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/deploy/test-ec2", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ec2Host: cleanHost,
+          ec2User: cleanUser,
+          ec2KeyPath: cleanKeyPath,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setEc2TestResult({
+          ok: true,
+          message: data.message || "Connection successful!",
+          output: data.output,
+        });
+      } else {
+        setEc2TestResult({
+          ok: false,
+          message: data.error || "Failed to connect to EC2 via SSH.",
+          suggestion: data.suggestion,
+        });
+      }
+    } catch (err) {
+      setEc2TestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : "Connection test failed.",
+      });
+    } finally {
+      setIsTestingEc2(false);
+    }
   }
 
   async function handleRunPipeline(e: React.FormEvent) {
     e.preventDefault();
     setPipelineResult(null);
     setIsPushing(true);
+
+    const cleanKeyPath = ec2KeyPath.replace(/^["']+|["']+$/g, "").trim();
+    let cleanUser = ec2User.trim() || "ec2-user";
+    if (/^(linux\/unix|linux|unix)$/i.test(cleanUser)) {
+      cleanUser = "ec2-user";
+      setEc2User("ec2-user");
+    }
 
     try {
       const res = await fetch("/api/git/push", {
@@ -187,8 +270,8 @@ export default function ConfigurationPage() {
             authToken: cloudToken.trim() || undefined,
             environment: cloudEnv,
             ec2Host: ec2Host.trim() || undefined,
-            ec2User: ec2User.trim() || undefined,
-            ec2KeyPath: ec2KeyPath.trim() || undefined,
+            ec2User: cleanUser || undefined,
+            ec2KeyPath: cleanKeyPath || undefined,
             ec2AppDir: ec2AppDir.trim() || undefined,
             ec2Command: ec2Command.trim() || undefined,
             autoDeploy: true,
@@ -409,11 +492,11 @@ export default function ConfigurationPage() {
                 <input
                   type="text"
                   value={ec2Host}
-                  onChange={(e) => setEc2Host(e.target.value)}
-                  placeholder="e.g. 54.210.123.45 or ec2-54-210-123-45.compute-1.amazonaws.com"
+                  onChange={(e) => setEc2Host(e.target.value.trim())}
+                  placeholder="e.g. 54.234.162.213 or ec2-54-234-162-213.compute-1.amazonaws.com"
                   className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60"
                 />
-                <p className="mt-1 text-xs text-muted">Found in your AWS EC2 Console under *Public IPv4 address*.</p>
+                <p className="mt-1 text-xs text-muted">Found in your AWS EC2 Console under <em>Public IPv4 address</em> or <em>Public IPv4 DNS</em>.</p>
               </div>
 
               <div>
@@ -422,10 +505,48 @@ export default function ConfigurationPage() {
                   type="text"
                   value={ec2User}
                   onChange={(e) => setEc2User(e.target.value)}
-                  placeholder="ubuntu (for Ubuntu) or ec2-user (Amazon Linux)"
-                  className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60"
+                  placeholder="ec2-user (Amazon Linux) or ubuntu (Ubuntu)"
+                  className={`mt-1 block w-full rounded-md border bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60 ${
+                    /linux\/unix|linux|unix/i.test(ec2User) ? "border-bad text-bad" : "border-line"
+                  }`}
                 />
-                <p className="mt-1 text-xs text-muted">Default user: `ubuntu` for Ubuntu AMIs, `ec2-user` for Amazon Linux.</p>
+                <div className="flex items-center gap-2 mt-1.5">
+                  <span className="text-[11px] text-muted">Presets:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEc2User("ec2-user");
+                      if (ec2AppDir.includes("ubuntu") || !ec2AppDir) setEc2AppDir("/home/ec2-user/app");
+                    }}
+                    className={`px-2 py-0.5 rounded text-xs border cursor-pointer ${
+                      ec2User === "ec2-user"
+                        ? "border-accent bg-accent/15 text-accent font-semibold"
+                        : "border-line text-muted hover:text-ink"
+                    }`}
+                  >
+                    ec2-user (Amazon Linux)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEc2User("ubuntu");
+                      if (ec2AppDir.includes("ec2-user") || !ec2AppDir) setEc2AppDir("/home/ubuntu/app");
+                    }}
+                    className={`px-2 py-0.5 rounded text-xs border cursor-pointer ${
+                      ec2User === "ubuntu"
+                        ? "border-accent bg-accent/15 text-accent font-semibold"
+                        : "border-line text-muted hover:text-ink"
+                    }`}
+                  >
+                    ubuntu (Ubuntu)
+                  </button>
+                </div>
+                {/linux\/unix|linux|unix/i.test(ec2User) && (
+                  <p className="mt-1.5 flex items-center gap-1.5 text-xs text-bad">
+                    <AlertTriangle className="size-3.5 shrink-0" />
+                    <span><strong>&ldquo;Linux/UNIX&rdquo;</strong> is AWS OS platform info, not an SSH username. Click <strong>ec2-user</strong> or <strong>ubuntu</strong> above.</span>
+                  </p>
+                )}
               </div>
 
               <div className="md:col-span-2">
@@ -436,11 +557,11 @@ export default function ConfigurationPage() {
                 <input
                   type="text"
                   value={ec2KeyPath}
-                  onChange={(e) => setEc2KeyPath(e.target.value)}
-                  placeholder="e.g. C:\Users\dhruv\.ssh\my-aws-key.pem"
+                  onChange={(e) => setEc2KeyPath(e.target.value.replace(/^["']+|["']+$/g, ""))}
+                  placeholder="e.g. C:\Users\ameer\Downloads\secureship.pem"
                   className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60"
                 />
-                <p className="mt-1 text-xs text-muted">The path to your downloaded AWS Key Pair `.pem` file on this machine.</p>
+                <p className="mt-1 text-xs text-muted">Path to your AWS Key Pair <code>.pem</code> file on this machine (quotes from &ldquo;Copy as path&rdquo; are stripped automatically).</p>
               </div>
 
               <div>
@@ -468,6 +589,66 @@ export default function ConfigurationPage() {
                   className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60"
                 />
                 <p className="mt-1 text-xs text-muted">Auto-bootstraps automatically: creates folder, clones repository, builds, and starts your app.</p>
+              </div>
+
+              {/* Instant SSH Test Panel */}
+              <div className="md:col-span-2 flex flex-col gap-3 pt-3 border-t border-line/60">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <div className="text-xs text-muted">
+                    Test your SSH connection, private key, and remote environment before triggering CI/CD.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleTestEc2}
+                    disabled={isTestingEc2 || !ec2Host}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-accent/40 bg-accent/10 px-3.5 py-1.5 text-xs font-semibold text-accent hover:bg-accent/20 disabled:opacity-40 cursor-pointer self-start sm:self-auto"
+                  >
+                    {isTestingEc2 ? (
+                      <>
+                        <Loader2 className="size-3.5 animate-spin" />
+                        Testing SSH Connection…
+                      </>
+                    ) : (
+                      <>
+                        <Server className="size-3.5" />
+                        Test EC2 SSH Connection
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {ec2TestResult && (
+                  <div
+                    className={`rounded-lg border p-3.5 text-xs ${
+                      ec2TestResult.ok
+                        ? "border-ok/30 bg-ok/10 text-ok"
+                        : "border-bad/30 bg-bad/10 text-bad"
+                    }`}
+                  >
+                    <div className="font-semibold flex items-center gap-1.5">
+                      {ec2TestResult.ok ? (
+                        <>
+                          <CheckCircle2 className="size-4 text-ok shrink-0" />
+                          <span>SSH Connection Verified!</span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertTriangle className="size-4 text-bad shrink-0" />
+                          <span>SSH Connection Failed</span>
+                        </>
+                      )}
+                    </div>
+                    <p className="mt-1 font-mono">{ec2TestResult.message}</p>
+                    {ec2TestResult.suggestion && (
+                      <p className="mt-1 text-ink/80">{ec2TestResult.suggestion}</p>
+                    )}
+                    {ec2TestResult.output && (
+                      <pre className="mt-2 rounded bg-bg/80 p-2.5 text-[11px] font-mono text-ink whitespace-pre-wrap border border-line/40">
+                        {ec2TestResult.output}
+                      </pre>
+                    )}
+                  </div>
+                )}
               </div>
             </>
           ) : (
