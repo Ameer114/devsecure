@@ -33,7 +33,13 @@ export async function POST(req: Request) {
       );
     }
 
-    const sshArgs: string[] = ["-n", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"];
+    const sshArgs: string[] = [
+      "-4",
+      "-n",
+      "-o", "StrictHostKeyChecking=no",
+      "-o", "ConnectTimeout=15",
+      "-o", "ServerAliveInterval=10",
+    ];
     if (keyPath) {
       sshArgs.push("-i", keyPath);
     }
@@ -56,7 +62,7 @@ export async function POST(req: Request) {
     const errMsg = err instanceof Error ? err.message : String(err);
     let suggestion = "";
     if (errMsg.includes("timed out") || errMsg.includes("Connection timed out")) {
-      suggestion = "AWS EC2 connection timed out on port 22. In AWS Console -> Security Groups -> Edit Inbound Rules -> Add Port 22 (SSH) from 0.0.0.0/0 or your IP.";
+      suggestion = "AWS EC2 connection timed out. If the instance froze during a previous build, in AWS Console do: Instance state -> Stop instance, wait until stopped, then Start instance. If the Public IP changes, update it in Configuration.";
     } else if (errMsg.includes("Permission denied")) {
       suggestion = "Authentication failed (publickey). Verify that the .pem key matches this instance and that the SSH user is correct (e.g. 'ec2-user' for Amazon Linux, 'ubuntu' for Ubuntu). Do not use 'Linux/UNIX'.";
     } else if (errMsg.includes("not accessible: No such file or directory")) {

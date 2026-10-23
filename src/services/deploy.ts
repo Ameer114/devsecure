@@ -74,14 +74,21 @@ export async function triggerCloudDeployment(params: {
       // 2. Automatically create directory (mkdir -p)
       // 3. Automatically clone repo if first run, or pull latest code if already cloned
       // 4. Build & start/restart application
-      const autoBootstrapCmd = `(if [ ! -f /swapfile ] && command -v dd >/dev/null 2>&1; then (sudo dd if=/dev/zero of=/swapfile bs=128M count=16 2>/dev/null && sudo chmod 600 /swapfile && sudo mkswap /swapfile 2>/dev/null && sudo swapon /swapfile 2>/dev/null) || true; fi) && (command -v git >/dev/null 2>&1 || (sudo dnf install -y git 2>/dev/null || sudo yum install -y git 2>/dev/null || (sudo apt-get update -y && sudo apt-get install -y git) 2>/dev/null || true)) && ((command -v node >/dev/null 2>&1 && node -e "process.exit(parseInt(process.versions.node) >= 20 ? 0 : 1)" 2>/dev/null) || (sudo dnf remove -y nodejs nodejs-npm 2>/dev/null; sudo dnf install -y nodejs22 nodejs22-npm 2>/dev/null || (curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash - && sudo dnf install -y nodejs) 2>/dev/null || (curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs) 2>/dev/null || true)) && (command -v pm2 >/dev/null 2>&1 || sudo npm install -g pm2 2>/dev/null || true) && mkdir -p "${appDir}" && cd "${appDir}" && (if [ ! -d .git ]; then ${targetRepoUrl ? `git clone "${targetRepoUrl}" .` : `git init`}; else ${targetRepoUrl ? `git remote set-url origin "${targetRepoUrl}" 2>/dev/null || true;` : ""} git fetch origin 2>/dev/null || true; git checkout "${branch}" 2>/dev/null || true; git pull origin "${branch}" 2>/dev/null || true; fi) && (if [ -f package.json ]; then npm install && npm run build --if-present && (command -v pm2 >/dev/null 2>&1 && (pm2 restart all || pm2 start npm --name "app" -- start) || (npm run start &)); fi)`;
+      const autoBootstrapCmd = `(if [ ! -f /swapfile ] && command -v dd >/dev/null 2>&1; then (sudo dd if=/dev/zero of=/swapfile bs=128M count=16 2>/dev/null && sudo chmod 600 /swapfile && sudo mkswap /swapfile 2>/dev/null && sudo swapon /swapfile 2>/dev/null) || true; fi) && (command -v git >/dev/null 2>&1 || (sudo dnf install -y git 2>/dev/null || sudo yum install -y git 2>/dev/null || (sudo apt-get update -y && sudo apt-get install -y git) 2>/dev/null || true)) && ((command -v node >/dev/null 2>&1 && node -e "process.exit(parseInt(process.versions.node) >= 20 ? 0 : 1)" 2>/dev/null) || (sudo dnf remove -y nodejs nodejs-npm 2>/dev/null; sudo dnf install -y nodejs22 nodejs22-npm 2>/dev/null || (curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash - && sudo dnf install -y nodejs) 2>/dev/null || (curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs) 2>/dev/null || true)) && (command -v pm2 >/dev/null 2>&1 || sudo npm install -g pm2 2>/dev/null || true) && mkdir -p "${appDir}" && cd "${appDir}" && (if [ ! -d .git ]; then ${targetRepoUrl ? `git clone "${targetRepoUrl}" .` : `git init`}; else ${targetRepoUrl ? `git remote set-url origin "${targetRepoUrl}" 2>/dev/null || true;` : ""} git fetch origin 2>/dev/null || true; git checkout "${branch}" 2>/dev/null || true; git pull origin "${branch}" 2>/dev/null || true; fi) && (if [ -f package.json ]; then export NODE_OPTIONS="--max-old-space-size=1536" && export NEXT_TELEMETRY_DISABLED=1 && npm install --no-audit && npm run build --if-present && (command -v pm2 >/dev/null 2>&1 && (pm2 restart all || pm2 start npm --name "app" -- start) || (npm run start &)); fi)`;
 
       const customCmd = config.ec2Command?.trim();
       const remoteScript = customCmd && !customCmd.startsWith("git pull")
         ? `mkdir -p "${appDir}" && cd "${appDir}" && ${customCmd}`
         : autoBootstrapCmd;
 
-      const sshArgs: string[] = ["-n", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"];
+      const sshArgs: string[] = [
+        "-4",
+        "-n",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "ConnectTimeout=20",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=4",
+      ];
       if (keyPath) {
         sshArgs.push("-i", keyPath);
       }
@@ -100,7 +107,7 @@ export async function triggerCloudDeployment(params: {
         logger.warn("AWS EC2 SSH deploy failed", { errMsg });
 
         if (errMsg.includes("timed out") || errMsg.includes("Connection timed out")) {
-          statusMessage = `AWS EC2 Connection Timed Out on Port 22 (${host}). Action Required: In AWS EC2 Console -> Security Groups -> Edit Inbound Rules -> Add Port 22 (SSH) from "Anywhere-IPv4" (0.0.0.0/0) or "My IP".`;
+          statusMessage = `AWS EC2 Connection Timed Out (${host}). If the instance froze during a previous build, in AWS Console do: Instance state -> Stop instance, wait until stopped, then Start instance (update new IP if changed). Also ensure Port 22 is open in Security Group.`;
         } else if (errMsg.includes("not accessible: No such file or directory")) {
           statusMessage = `AWS EC2 Key (.pem) file not accessible on this machine: "${keyPath}". Please check the path and ensure there are no extra quotes.`;
         } else if (errMsg.includes("Permission denied") || errMsg.includes("Host key verification failed")) {
