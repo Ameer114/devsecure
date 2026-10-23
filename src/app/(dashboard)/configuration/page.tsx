@@ -449,10 +449,10 @@ export default function ConfigurationPage() {
                   type="text"
                   value={ec2AppDir}
                   onChange={(e) => setEc2AppDir(e.target.value)}
-                  placeholder="/home/ubuntu/app or /var/www/my-app"
+                  placeholder="/home/ec2-user/app or /home/ubuntu/app"
                   className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60"
                 />
-                <p className="mt-1 text-xs text-muted">Directory on the EC2 instance where the code lives.</p>
+                <p className="mt-1 text-xs text-muted">Folder on EC2. Automatically created with <code>mkdir -p</code> and cloned if not present.</p>
               </div>
 
               <div>
@@ -464,10 +464,10 @@ export default function ConfigurationPage() {
                   type="text"
                   value={ec2Command}
                   onChange={(e) => setEc2Command(e.target.value)}
-                  placeholder="git pull && npm install && npm run build && pm2 restart all"
+                  placeholder="Auto-bootstraps: clone, build, start"
                   className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60"
                 />
-                <p className="mt-1 text-xs text-muted">Executed via SSH inside the remote folder to run the updated app.</p>
+                <p className="mt-1 text-xs text-muted">Auto-bootstraps automatically: creates folder, clones repository, builds, and starts your app.</p>
               </div>
             </>
           ) : (

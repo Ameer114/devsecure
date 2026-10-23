@@ -223,6 +223,7 @@ export async function POST(req: Request) {
     const deployResult = await triggerCloudDeployment({
       repoId: repo.id,
       repoFullName: repo.fullName,
+      repoUrl: repoUrl || remoteOrigin || `https://github.com/${repo.fullName}.git`,
       runId: run.id,
       commitSha,
       branch,

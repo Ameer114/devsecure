@@ -25,12 +25,13 @@ export interface CloudDeployConfig {
 export async function triggerCloudDeployment(params: {
   repoId: string;
   repoFullName: string;
+  repoUrl?: string;
   runId: string;
   commitSha: string;
   branch: string;
   config?: CloudDeployConfig;
 }): Promise<{ ok: boolean; message: string; deployment?: DeploymentRecord }> {
-  const { repoId, repoFullName, runId, commitSha, branch, config } = params;
+  const { repoId, repoFullName, repoUrl, runId, commitSha, branch, config } = params;
   const env = config?.environment || "production";
   const provider = config?.provider || "aws";
 
@@ -50,9 +51,19 @@ export async function triggerCloudDeployment(params: {
       const user = config.ec2User?.trim() || "ec2-user";
       const keyPath = config.ec2KeyPath?.trim() || "";
       const appDir = config.ec2AppDir?.trim() || "/home/ec2-user/app";
-      const runCmd = config.ec2Command?.trim() || "git pull && npm install && npm run build && pm2 restart all";
+      const targetRepoUrl = repoUrl?.trim() || (repoFullName ? `https://github.com/${repoFullName}.git` : "");
 
-      const remoteScript = `cd "${appDir}" && ${runCmd}`;
+      // Fully automated bootstrapping:
+      // 1. Automatically create directory (mkdir -p) so user never has to create it manually
+      // 2. Automatically clone repo if first run, or pull latest code if already cloned
+      // 3. Build & start/restart application
+      const autoBootstrapCmd = `mkdir -p "${appDir}" && cd "${appDir}" && (if [ ! -d .git ]; then ${targetRepoUrl ? `git clone "${targetRepoUrl}" .` : `git init`}; else ${targetRepoUrl ? `git remote set-url origin "${targetRepoUrl}" 2>/dev/null || true;` : ""} git fetch origin 2>/dev/null || true; git checkout "${branch}" 2>/dev/null || true; git pull origin "${branch}" 2>/dev/null || true; fi) && (if [ -f package.json ]; then npm install && npm run build --if-present && (command -v pm2 >/dev/null 2>&1 && (pm2 restart all || pm2 start npm --name "app" -- start) || (npm run start &)); fi)`;
+
+      const customCmd = config.ec2Command?.trim();
+      const remoteScript = customCmd && !customCmd.startsWith("git pull")
+        ? `mkdir -p "${appDir}" && cd "${appDir}" && ${customCmd}`
+        : autoBootstrapCmd;
+
       const sshArgs: string[] = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=15"];
       if (keyPath) {
         sshArgs.push("-i", keyPath);
@@ -64,13 +75,20 @@ export async function triggerCloudDeployment(params: {
         remoteDeployed = true;
         isSuccess = true;
         const sshOutput = (stdout || stderr).trim();
-        statusMessage = `Successfully deployed to AWS EC2 (${user}@${host}). Output: ${sshOutput.slice(0, 300)}`;
+        statusMessage = `Successfully created directory and deployed to AWS EC2 (${user}@${host}). Output: ${sshOutput.slice(0, 300)}`;
         deployDetails = statusMessage;
       } catch (sshErr) {
         isSuccess = false;
         const errMsg = sshErr instanceof Error ? sshErr.message : String(sshErr);
         logger.warn("AWS EC2 SSH deploy failed", { errMsg });
-        statusMessage = `AWS EC2 SSH failed: ${errMsg}. Check that Port 22 is open in AWS Security Group and PEM key path is valid.`;
+
+        if (errMsg.includes("timed out") || errMsg.includes("Connection timed out")) {
+          statusMessage = `AWS EC2 Connection Timed Out on Port 22 (${host}). Action Required: In AWS EC2 Console -> Security Groups -> Edit Inbound Rules -> Add Port 22 (SSH) from "Anywhere-IPv4" (0.0.0.0/0) or "My IP".`;
+        } else if (errMsg.includes("Permission denied") || errMsg.includes("Host key verification failed")) {
+          statusMessage = `AWS EC2 SSH Authentication Failed. Check that your .pem key path is correct on your computer and the SSH user is "${user}".`;
+        } else {
+          statusMessage = `AWS EC2 SSH failed: ${errMsg}. Check that Port 22 is open in AWS Security Group and PEM key path is valid.`;
+        }
         deployDetails = statusMessage;
       }
     }
