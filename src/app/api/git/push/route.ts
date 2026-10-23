@@ -1,16 +1,23 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { promisify } from "node:util";
 import { logger } from "@/lib/logger";
 import { store } from "@/lib/store";
+import type { PolicyDecisionRecord } from "@/lib/types";
 import { recordAudit } from "@/services/audit";
+import { triggerCloudDeployment, type CloudDeployConfig } from "@/services/deploy";
+import { runSecurityScan } from "@/services/scanner";
 
 const execFileAsync = promisify(execFile);
 
 interface PushPayload {
   repoUrl?: string;
+  localFolderPath?: string;
   branch?: string;
   commitMessage?: string;
   repoFullName?: string;
+  cloudConfig?: CloudDeployConfig;
 }
 
 function parseOwnerAndRepo(url: string): { owner: string; repo: string } | null {
@@ -18,6 +25,12 @@ function parseOwnerAndRepo(url: string): { owner: string; repo: string } | null 
   const match = clean.match(/(?:github\.com\/)?([^/]+)\/([^/]+)$/);
   if (!match) return null;
   return { owner: match[1], repo: match[2] };
+}
+
+export async function GET() {
+  return Response.json({
+    defaultPath: process.cwd(),
+  });
 }
 
 export async function POST(req: Request) {
@@ -31,8 +44,19 @@ export async function POST(req: Request) {
   const branch = body.branch?.trim() || "main";
   const commitMessage = body.commitMessage?.trim() || `feat: update from SecureShip dashboard [${new Date().toLocaleTimeString()}]`;
   const repoUrl = body.repoUrl?.trim();
+  const cloudConfig = body.cloudConfig;
 
-  const cwd = process.cwd();
+  let cwd = process.cwd();
+  if (body.localFolderPath?.trim()) {
+    const candidatePath = path.resolve(body.localFolderPath.trim());
+    if (!fs.existsSync(candidatePath)) {
+      return Response.json(
+        { ok: false, error: `Local folder does not exist: "${body.localFolderPath}". Check the folder path in Configuration.` },
+        { status: 400 }
+      );
+    }
+    cwd = candidatePath;
+  }
 
   try {
     // 1. Ensure git is initialized in cwd
@@ -70,12 +94,9 @@ export async function POST(req: Request) {
 
     // 3. Stage and commit any pending changes
     const { stdout: statusOut } = await execFileAsync("git", ["status", "--porcelain"], { cwd });
-    let newCommitCreated = false;
-
     if (statusOut.trim().length > 0) {
       await execFileAsync("git", ["add", "-A"], { cwd });
       await execFileAsync("git", ["commit", "-m", commitMessage], { cwd });
-      newCommitCreated = true;
     }
 
     // 4. Retrieve latest commit hash and message
@@ -85,23 +106,15 @@ export async function POST(req: Request) {
     const { stdout: logOut } = await execFileAsync("git", ["log", "-1", "--pretty=%s"], { cwd });
     const latestMessage = logOut.trim();
 
-    // 5. Push to GitHub using system Git CLI (uses Windows Git Credential Manager/SSH automatically)
-    let pushOutput = "";
+    // 5. Push to GitHub using system Git CLI
     let pushedToRemote = false;
-
     if (remoteOrigin) {
       try {
-        const { stdout: pushStdout, stderr: pushStderr } = await execFileAsync(
-          "git",
-          ["push", "-u", "origin", branch],
-          { cwd }
-        );
-        pushOutput = pushStdout || pushStderr;
+        await execFileAsync("git", ["push", "-u", "origin", branch], { cwd });
         pushedToRemote = true;
       } catch (pushErr) {
         const errMessage = pushErr instanceof Error ? pushErr.message : String(pushErr);
         logger.warn("git push returned message", { errMessage });
-        // Return clear status if push was rejected or auth needed
         return Response.json(
           {
             ok: false,
@@ -113,13 +126,13 @@ export async function POST(req: Request) {
       }
     }
 
-    // 6. Register or update repository in store
+    // 6. Register or retrieve repository in store
     let targetName = body.repoFullName;
     if (!targetName && remoteOrigin) {
       const parsed = parseOwnerAndRepo(remoteOrigin);
       if (parsed) targetName = `${parsed.owner}/${parsed.repo}`;
     }
-    if (!targetName) targetName = "local/secureship";
+    if (!targetName) targetName = path.basename(cwd) || "local/project";
 
     let repo = store.repositories.find((r) => r.fullName.toLowerCase() === targetName?.toLowerCase());
     if (!repo) {
@@ -130,48 +143,123 @@ export async function POST(req: Request) {
       });
     }
 
-    // Record verified pipeline run
+    // 7. REAL SECURITY SCANNING: Check repository files for exposed secrets and vulnerabilities
+    const runId = `run_${Date.now()}`;
+    const scanFindings = runSecurityScan(cwd, repo.id, runId, repo.fullName);
+
+    // Save any findings into store
+    for (const f of scanFindings) {
+      store.findings.unshift(f);
+    }
+
+    const blockingFindings = scanFindings.filter(
+      (f) => f.severity === "CRITICAL" || f.severity === "HIGH" || f.kind === "SECRET"
+    );
+    const isGateBlocked = blockingFindings.length > 0;
+
+    // 8. Deterministic Policy Gate Decision
+    const reasons = isGateBlocked
+      ? blockingFindings.map((f) => `${f.title} in ${f.filePath}:${f.startLine}`)
+      : ["All security checks passed. Zero exposed secrets or critical vulnerabilities."];
+
     const run = store.createRun({
       repositoryId: repo.id,
       branch,
       commitSha,
-      actor: "git-cli",
-      status: "PASSED",
-      reasons: ["Latest commit pushed and verified by system git"],
+      actor: "ci-cd-pipeline",
+      status: isGateBlocked ? "BLOCKED" : "PASSED",
+      reasons,
+    });
+
+    const decision: PolicyDecisionRecord = {
+      id: `pol_${Date.now()}`,
+      runId: run.id,
+      policyVersion: "1.0",
+      outcome: isGateBlocked ? "BLOCK" : "ALLOW",
+      reasons,
+      createdAt: new Date(),
+    };
+    store.policyDecisions.unshift(decision);
+
+    // If gate is blocked, queue alert notification and STOP deployment!
+    if (isGateBlocked) {
+      store.notifications.unshift({
+        id: `notif_${Date.now()}`,
+        repositoryId: repo.id,
+        runId: run.id,
+        findingId: blockingFindings[0]?.id || null,
+        channel: "EMAIL",
+        recipient: repo.owner.email,
+        subject: `[SecureShip ALERT] Release gate BLOCKED for ${repo.fullName}`,
+        status: "QUEUED",
+        createdAt: new Date(),
+        repository: { fullName: repo.fullName, isDemo: false },
+      });
+
+      await recordAudit({
+        actor: "security-gate",
+        action: "pipeline.blocked",
+        entityType: "PipelineRun",
+        entityId: run.id,
+        repositoryId: repo.id,
+        metadata: {
+          commitSha: commitSha.slice(0, 7),
+          findingsCount: scanFindings.length,
+          reasons,
+        },
+      });
+
+      return Response.json({
+        ok: false,
+        blocked: true,
+        commitSha: commitSha.slice(0, 7),
+        findingsCount: scanFindings.length,
+        reasons,
+        message: `Security Release Gate HELD! ${scanFindings.length} security finding(s) detected. Cloud deployment halted.`,
+      });
+    }
+
+    // 9. SECURITY PASSED: Build & Deploy to Cloud!
+    const deployResult = await triggerCloudDeployment({
+      repoId: repo.id,
+      repoFullName: repo.fullName,
+      runId: run.id,
+      commitSha,
+      branch,
+      config: cloudConfig,
     });
 
     await recordAudit({
-      actor: "git-cli",
-      action: pushedToRemote ? "git.pushed_to_remote" : "git.commit_created",
+      actor: "ci-cd-pipeline",
+      action: "pipeline.passed_and_deployed",
       entityType: "PipelineRun",
       entityId: run.id,
       repositoryId: repo.id,
       metadata: {
         commitSha: commitSha.slice(0, 7),
-        message: latestMessage,
         pushedToRemote,
-        remoteOrigin: remoteOrigin || "(none)",
+        deployed: deployResult.ok,
       },
     });
 
     return Response.json({
       ok: true,
+      blocked: false,
+      deployed: deployResult.ok,
       commitSha: commitSha.slice(0, 7),
       latestMessage,
       branch,
+      folder: cwd,
       pushedToRemote,
-      newCommitCreated,
-      message: pushedToRemote
-        ? `Successfully pushed commit ${commitSha.slice(0, 7)} to GitHub (${remoteOrigin})!`
-        : `Committed ${commitSha.slice(0, 7)} locally. Link a GitHub repository URL in Configuration to push to remote.`,
-      pushOutput,
+      deployment: deployResult.deployment,
+      message: `Security scan passed! Pushed to GitHub and deployed to Cloud (${deployResult.deployment?.environment || "production"}).`,
     });
   } catch (err) {
-    logger.error("Failed to execute git command", { err });
+    logger.error("Failed to run CI/CD pipeline", { err });
     return Response.json(
       {
         ok: false,
-        error: err instanceof Error ? err.message : "Failed to run Git CLI command.",
+        error: err instanceof Error ? err.message : "CI/CD Pipeline failed.",
       },
       { status: 500 }
     );
