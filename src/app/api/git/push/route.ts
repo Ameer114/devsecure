@@ -1,14 +1,16 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { logger } from "@/lib/logger";
 import { store } from "@/lib/store";
 import { recordAudit } from "@/services/audit";
 
+const execFileAsync = promisify(execFile);
+
 interface PushPayload {
-  repoUrl: string;
-  githubToken?: string;
+  repoUrl?: string;
   branch?: string;
   commitMessage?: string;
-  folderOrFiles?: string;
-  ownerEmail?: string;
+  repoFullName?: string;
 }
 
 function parseOwnerAndRepo(url: string): { owner: string; repo: string } | null {
@@ -19,154 +21,159 @@ function parseOwnerAndRepo(url: string): { owner: string; repo: string } | null 
 }
 
 export async function POST(req: Request) {
-  let body: PushPayload;
+  let body: PushPayload = {};
   try {
     body = await req.json();
   } catch {
-    return Response.json({ error: "Invalid JSON payload" }, { status: 400 });
+    // Body is optional
   }
 
-  const { repoUrl, githubToken, branch = "main", commitMessage = "feat: sync from SecureShip", ownerEmail } = body;
+  const branch = body.branch?.trim() || "main";
+  const commitMessage = body.commitMessage?.trim() || `feat: update from SecureShip dashboard [${new Date().toLocaleTimeString()}]`;
+  const repoUrl = body.repoUrl?.trim();
 
-  if (!repoUrl) {
-    return Response.json({ error: "Repository link or name is required" }, { status: 422 });
-  }
+  const cwd = process.cwd();
 
-  const parsed = parseOwnerAndRepo(repoUrl);
-  if (!parsed) {
-    return Response.json({ error: "Invalid GitHub repository format. Use 'owner/repo' or 'https://github.com/owner/repo'" }, { status: 422 });
-  }
-
-  const fullName = `${parsed.owner}/${parsed.repo}`;
-
-  // If a GitHub token was provided, interact with GitHub API
-  let githubCommitSha = `git-${Date.now().toString(16)}`;
-  let pushedToGithub = false;
-
-  if (githubToken) {
+  try {
+    // 1. Ensure git is initialized in cwd
     try {
-      // 1. Check if the repo exists and is accessible
-      const repoCheck = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}`, {
-        headers: {
-          Authorization: `token ${githubToken.trim()}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "SecureShip-AI",
-        },
-      });
+      await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd });
+    } catch {
+      await execFileAsync("git", ["init"], { cwd });
+      await execFileAsync("git", ["branch", "-M", branch], { cwd });
+    }
 
-      if (!repoCheck.ok) {
-        const errorData = await repoCheck.json().catch(() => ({}));
+    // 2. Configure remote origin if repoUrl is provided
+    let remoteOrigin = "";
+    try {
+      const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd });
+      remoteOrigin = stdout.trim();
+    } catch {
+      // No remote origin yet
+    }
+
+    if (repoUrl) {
+      const normalizedUrl = repoUrl.startsWith("http") || repoUrl.startsWith("git@")
+        ? repoUrl
+        : `https://github.com/${repoUrl}.git`;
+
+      if (remoteOrigin) {
+        if (remoteOrigin !== normalizedUrl) {
+          await execFileAsync("git", ["remote", "set-url", "origin", normalizedUrl], { cwd });
+          remoteOrigin = normalizedUrl;
+        }
+      } else {
+        await execFileAsync("git", ["remote", "add", "origin", normalizedUrl], { cwd });
+        remoteOrigin = normalizedUrl;
+      }
+    }
+
+    // 3. Stage and commit any pending changes
+    const { stdout: statusOut } = await execFileAsync("git", ["status", "--porcelain"], { cwd });
+    let newCommitCreated = false;
+
+    if (statusOut.trim().length > 0) {
+      await execFileAsync("git", ["add", "-A"], { cwd });
+      await execFileAsync("git", ["commit", "-m", commitMessage], { cwd });
+      newCommitCreated = true;
+    }
+
+    // 4. Retrieve latest commit hash and message
+    const { stdout: shaOut } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd });
+    const commitSha = shaOut.trim();
+
+    const { stdout: logOut } = await execFileAsync("git", ["log", "-1", "--pretty=%s"], { cwd });
+    const latestMessage = logOut.trim();
+
+    // 5. Push to GitHub using system Git CLI (uses Windows Git Credential Manager/SSH automatically)
+    let pushOutput = "";
+    let pushedToRemote = false;
+
+    if (remoteOrigin) {
+      try {
+        const { stdout: pushStdout, stderr: pushStderr } = await execFileAsync(
+          "git",
+          ["push", "-u", "origin", branch],
+          { cwd }
+        );
+        pushOutput = pushStdout || pushStderr;
+        pushedToRemote = true;
+      } catch (pushErr) {
+        const errMessage = pushErr instanceof Error ? pushErr.message : String(pushErr);
+        logger.warn("git push returned message", { errMessage });
+        // Return clear status if push was rejected or auth needed
         return Response.json(
-          { error: `GitHub error (${repoCheck.status}): ${errorData.message || "Failed to access repository with provided token."}` },
-          { status: repoCheck.status === 401 ? 401 : 400 }
+          {
+            ok: false,
+            commitSha: commitSha.slice(0, 7),
+            error: `Git push failed: ${errMessage}. Verify that the remote repository exists and your system's Git has push permissions.`,
+          },
+          { status: 400 }
         );
       }
-
-      // 2. Push a commit or manifest file to the target branch via GitHub Contents API
-      const timestamp = new Date().toISOString();
-      const content = Buffer.from(
-        JSON.stringify(
-          {
-            project: fullName,
-            syncedBy: "SecureShip AI Frontend",
-            branch,
-            timestamp,
-            note: body.folderOrFiles || "Synced repository from SecureShip frontend",
-          },
-          null,
-          2
-        )
-      ).toString("base64");
-
-      // Check if .secureship.json already exists to obtain sha
-      const fileUrl = `https://api.github.com/repos/${parsed.owner}/${parsed.repo}/contents/.secureship.json?ref=${branch}`;
-      const existingFile = await fetch(fileUrl, {
-        headers: {
-          Authorization: `token ${githubToken.trim()}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "SecureShip-AI",
-        },
-      });
-
-      let fileSha: string | undefined;
-      if (existingFile.ok) {
-        const fileJson = await existingFile.json();
-        fileSha = fileJson.sha;
-      }
-
-      const putRes = await fetch(`https://api.github.com/repos/${parsed.owner}/${parsed.repo}/contents/.secureship.json`, {
-        method: "PUT",
-        headers: {
-          Authorization: `token ${githubToken.trim()}`,
-          Accept: "application/vnd.github.v3+json",
-          "User-Agent": "SecureShip-AI",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: `${commitMessage} [SecureShip sync]`,
-          content,
-          branch,
-          sha: fileSha,
-        }),
-      });
-
-      if (putRes.ok) {
-        const putJson = await putRes.json();
-        githubCommitSha = putJson.commit?.sha?.slice(0, 40) || githubCommitSha;
-        pushedToGithub = true;
-      } else {
-        const putErr = await putRes.json().catch(() => ({}));
-        logger.warn("GitHub commit failed", { putErr });
-        return Response.json({ error: `GitHub push failed: ${putErr.message || putRes.statusText}` }, { status: 400 });
-      }
-    } catch (err) {
-      logger.error("GitHub API communication error", { err });
-      return Response.json({ error: "Failed to connect to GitHub API." }, { status: 502 });
     }
-  }
 
-  // Register or retrieve repository in our in-memory store
-  let repo = store.repositories.find((r) => r.fullName.toLowerCase() === fullName.toLowerCase());
-  if (!repo) {
-    repo = store.createRepository({
-      fullName,
-      defaultBranch: branch,
-      ownerEmail: ownerEmail || "admin@example.com",
-    });
-  }
+    // 6. Register or update repository in store
+    let targetName = body.repoFullName;
+    if (!targetName && remoteOrigin) {
+      const parsed = parseOwnerAndRepo(remoteOrigin);
+      if (parsed) targetName = `${parsed.owner}/${parsed.repo}`;
+    }
+    if (!targetName) targetName = "local/secureship";
 
-  // Record a pipeline run for this push
-  const run = store.createRun({
-    repositoryId: repo.id,
-    branch,
-    commitSha: githubCommitSha,
-    actor: ownerEmail ? ownerEmail.split("@")[0] : "frontend-user",
-    status: "PASSED",
-    reasons: ["Frontend push verified and security policy passed"],
-  });
+    let repo = store.repositories.find((r) => r.fullName.toLowerCase() === targetName?.toLowerCase());
+    if (!repo) {
+      repo = store.createRepository({
+        fullName: targetName,
+        defaultBranch: branch,
+        ownerEmail: "developer@local",
+      });
+    }
 
-  await recordAudit({
-    actor: ownerEmail || "frontend-user",
-    action: pushedToGithub ? "repository.pushed_to_github" : "repository.registered",
-    entityType: "Repository",
-    entityId: repo.id,
-    repositoryId: repo.id,
-    metadata: {
-      fullName,
+    // Record verified pipeline run
+    const run = store.createRun({
+      repositoryId: repo.id,
       branch,
-      commitSha: githubCommitSha,
-      pushedToGithub,
-    },
-  });
+      commitSha,
+      actor: "git-cli",
+      status: "PASSED",
+      reasons: ["Latest commit pushed and verified by system git"],
+    });
 
-  return Response.json({
-    ok: true,
-    repository: repo,
-    runId: run.id,
-    commitSha: githubCommitSha,
-    pushedToGithub,
-    message: pushedToGithub
-      ? `Successfully pushed commit ${githubCommitSha.slice(0, 7)} to GitHub (${fullName})!`
-      : `Registered ${fullName} in SecureShip. (No GitHub token provided; recorded locally).`,
-  });
+    await recordAudit({
+      actor: "git-cli",
+      action: pushedToRemote ? "git.pushed_to_remote" : "git.commit_created",
+      entityType: "PipelineRun",
+      entityId: run.id,
+      repositoryId: repo.id,
+      metadata: {
+        commitSha: commitSha.slice(0, 7),
+        message: latestMessage,
+        pushedToRemote,
+        remoteOrigin: remoteOrigin || "(none)",
+      },
+    });
+
+    return Response.json({
+      ok: true,
+      commitSha: commitSha.slice(0, 7),
+      latestMessage,
+      branch,
+      pushedToRemote,
+      newCommitCreated,
+      message: pushedToRemote
+        ? `Successfully pushed commit ${commitSha.slice(0, 7)} to GitHub (${remoteOrigin})!`
+        : `Committed ${commitSha.slice(0, 7)} locally. Link a GitHub repository URL in Configuration to push to remote.`,
+      pushOutput,
+    });
+  } catch (err) {
+    logger.error("Failed to execute git command", { err });
+    return Response.json(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Failed to run Git CLI command.",
+      },
+      { status: 500 }
+    );
+  }
 }

@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
+import { PushCommitButton } from "@/components/push-commit-button";
 import { SeverityChart } from "@/components/severity-chart";
 import { DemoBanner, DemoTag, EmptyState, GatePill, Loading } from "@/components/ui";
 import { timeAgo } from "@/lib/format";
@@ -29,15 +30,20 @@ async function OverviewContent() {
   return (
     <>
       {o.hasDemo && <DemoBanner />}
-      <section aria-labelledby="gate-heading" className="max-w-4xl">
-        <h1 id="gate-heading" className="text-4xl leading-tight font-semibold tracking-tight md:text-5xl">
-          {cleared} of {o.repositoryCount} {o.repositoryCount === 1 ? "repository is" : "repositories are"} cleared to deploy
-        </h1>
-        <p className="mt-3 max-w-2xl text-muted">
-          {held > 0
-            ? `${held} held by policy. The gate is deterministic: AI can explain a finding but never reopens a held release.`
-            : "Every repository with a decision is passing its mandatory checks."}
-        </p>
+      <section aria-labelledby="gate-heading" className="max-w-4xl flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+        <div>
+          <h1 id="gate-heading" className="text-4xl leading-tight font-semibold tracking-tight md:text-5xl">
+            {cleared} of {o.repositoryCount} {o.repositoryCount === 1 ? "repository is" : "repositories are"} cleared to deploy
+          </h1>
+          <p className="mt-3 max-w-2xl text-muted">
+            {held > 0
+              ? `${held} held by policy. The gate is deterministic: AI can explain a finding but never reopens a held release.`
+              : "Every repository with a decision is passing its mandatory checks."}
+          </p>
+        </div>
+        <div className="shrink-0 pt-1">
+          <PushCommitButton label="Push Latest Commit to GitHub" />
+        </div>
       </section>
 
       <section aria-label="Repository gates" className="mt-8 max-w-4xl divide-y divide-line border-y border-line">
@@ -54,7 +60,10 @@ async function OverviewContent() {
                 {g.lastDeployment ? ` · Last deploy ${g.lastDeployment.status.toLowerCase().replace("_", " ")} ${timeAgo(g.lastDeployment.startedAt)}` : null}
               </div>
             </div>
-            <div><GatePill state={g.state} /></div>
+            <div className="flex flex-wrap items-center gap-2">
+              <GatePill state={g.state} />
+              <PushCommitButton repoFullName={g.fullName} branch={g.branch} label="Push" />
+            </div>
           </div>
         ))}
       </section>
