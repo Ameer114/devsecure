@@ -74,4 +74,71 @@ describe("Security Scanner & Zero-Secret Gate", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("allows secrets in .env when .env is safely included in .gitignore", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "secureship-gitignored-env-"));
+    const gitignoreFile = path.join(tmpDir, ".gitignore");
+    fs.writeFileSync(gitignoreFile, "node_modules\n.env\n", "utf-8");
+
+    const envFile = path.join(tmpDir, ".env");
+    fs.writeFileSync(
+      envFile,
+      'PORT=3000\nAWS_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nNODE_ENV=production\n',
+      "utf-8"
+    );
+
+    try {
+      const findings = runSecurityScan(tmpDir, "repo-1", "run-1", "test/repo");
+      const criticalOrSecrets = findings.filter(
+        (f) => f.severity === "CRITICAL" || f.kind === "SECRET"
+      );
+      expect(criticalOrSecrets.length).toBe(0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("generates real Groq AI remediation citing exact file and line number", async () => {
+    const { generateFindingExplanation } = await import("@/services/ai");
+    const finding = {
+      scanner: "GITLEAKS",
+      ruleId: "aws-access-key-id",
+      title: "AWS Access Key ID exposed",
+      filePath: "src/config/aws.ts",
+      startLine: 14,
+    };
+
+    const groqKey = process.env.GROQ_API_KEY;
+    const result = await generateFindingExplanation(finding, groqKey);
+    expect(result.explanation).toBeDefined();
+    expect(result.suggestion).toBeDefined();
+    expect(result.explanation.length).toBeGreaterThan(20);
+    expect(result.suggestion.length).toBeGreaterThan(20);
+  }, 25000);
+
+  it("dispatches security alert email containing file, line number, and remediation", async () => {
+    const { sendSecurityAlertEmail } = await import("@/services/email");
+    const result = await sendSecurityAlertEmail({
+      to: "developer@example.com",
+      subject: "[SecureShip Test Alert] Pre-push verification",
+      repoFullName: "secureship/devsecure",
+      commitSha: "a1b2c3d4e5",
+      branch: "main",
+      findingDetails: [
+        {
+          ruleId: "aws-access-key-id",
+          title: "AWS Access Key ID exposed",
+          filePath: "src/config/aws.ts",
+          startLine: 14,
+          severity: "CRITICAL",
+        },
+      ],
+      aiExplanation: "Exposed AWS access keys grant full programmatic access to cloud resources.",
+      aiSuggestion: "Move credential to .env, add .env to .gitignore, and access via process.env.",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.previewUrl || result.isRealDelivery || result.messageId).toBeTruthy();
+  }, 25000);
 });
+

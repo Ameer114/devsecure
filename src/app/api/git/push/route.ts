@@ -149,9 +149,13 @@ export async function POST(req: Request) {
 
       // Automatically generate AI explanation using Groq if key is available
       let aiAnalysis: { explanation?: string; suggestion?: string } = {};
+      const activeGroqKey = body.groqApiKey?.trim() || process.env.GROQ_API_KEY;
+      if (activeGroqKey) {
+        process.env.GROQ_API_KEY = activeGroqKey;
+      }
       if (blockingFindings[0]) {
         try {
-          aiAnalysis = await generateFindingExplanation(blockingFindings[0], body.groqApiKey);
+          aiAnalysis = await generateFindingExplanation(blockingFindings[0], activeGroqKey);
           blockingFindings[0].aiExplanation = aiAnalysis.explanation;
           blockingFindings[0].aiSuggestion = aiAnalysis.suggestion;
         } catch (aiErr) {
@@ -249,9 +253,11 @@ export async function POST(req: Request) {
           sent: emailResult.ok,
           recipient: recipientEmail,
           previewUrl: emailResult.previewUrl || undefined,
+          isRealDelivery: emailResult.isRealDelivery,
+          error: emailResult.error,
         },
         aiAnalysis: aiAnalysis.explanation ? aiAnalysis : undefined,
-        message: `🛑 PRE-PUSH SECURITY GATE HELD! Push to GitHub aborted. Exposed secret detected in ${blockingFindings[0]?.filePath}:${blockingFindings[0]?.startLine}. Code was NOT pushed to GitHub and NOT deployed to AWS. Alert email ${emailResult.ok ? "sent" : "queued"} to ${recipientEmail}.`,
+        message: `🛑 PRE-PUSH SECURITY GATE HELD! Push to GitHub aborted. Exposed secret detected in ${blockingFindings[0]?.filePath}:${blockingFindings[0]?.startLine}. Code was NOT pushed to GitHub and NOT deployed to AWS. Alert email ${emailResult.ok ? (emailResult.isRealDelivery ? "delivered to your inbox" : "sent (Ethereal sandbox preview)") : "failed to send"} (${recipientEmail}).`,
       });
     }
 

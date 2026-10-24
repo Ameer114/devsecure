@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -164,6 +165,73 @@ function getFilesRecursively(dir: string, maxFiles = 300): string[] {
   return results;
 }
 
+function filterIgnoredFiles(filePaths: string[], targetDir: string): string[] {
+  if (filePaths.length === 0) return [];
+
+  let ignoredSet = new Set<string>();
+
+  try {
+    const relPaths = filePaths.map((p) => path.relative(targetDir, p).replace(/\\/g, "/"));
+    let stdout = "";
+    try {
+      stdout = execFileSync("git", ["check-ignore", "--stdin", "--no-index"], {
+        cwd: targetDir,
+        input: relPaths.join("\n"),
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+    } catch (gitErr: unknown) {
+      // Git exits with code 1 if none of the provided files matched .gitignore patterns
+      const codeErr = gitErr as { status?: number; stdout?: string | Buffer };
+      if (codeErr && codeErr.status === 1 && codeErr.stdout) {
+        stdout = String(codeErr.stdout);
+      } else {
+        throw gitErr;
+      }
+    }
+
+    ignoredSet = new Set(
+      stdout
+        .split(/\r?\n/)
+        .map((s) => s.trim().replace(/\\/g, "/"))
+        .filter(Boolean)
+    );
+  } catch {
+    // Fallback: manually parse .gitignore in targetDir
+    const gitignorePath = path.join(targetDir, ".gitignore");
+    if (fs.existsSync(gitignorePath)) {
+      try {
+        const lines = fs
+          .readFileSync(gitignorePath, "utf-8")
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith("#"));
+
+        return filePaths.filter((p) => {
+          const rel = path.relative(targetDir, p).replace(/\\/g, "/");
+          const base = path.basename(rel);
+          return !lines.some((pattern) => {
+            const clean = pattern.replace(/^\//, "").replace(/\/$/, "");
+            if (clean === base || clean === rel) return true;
+            if (clean === ".env" && (base === ".env" || base.startsWith(".env."))) return true;
+            if (clean === ".env*" && base.startsWith(".env")) return true;
+            if (clean.startsWith("*") && base.endsWith(clean.slice(1))) return true;
+            if (clean.endsWith("*") && base.startsWith(clean.slice(0, -1))) return true;
+            return false;
+          });
+        });
+      } catch {
+        return filePaths;
+      }
+    }
+  }
+
+  return filePaths.filter((p) => {
+    const rel = path.relative(targetDir, p).replace(/\\/g, "/");
+    return !ignoredSet.has(rel);
+  });
+}
+
 export function runSecurityScan(
   targetDir: string,
   repoId: string,
@@ -171,7 +239,8 @@ export function runSecurityScan(
   repoFullName: string
 ): FindingRecord[] {
   const findings: FindingRecord[] = [];
-  const files = getFilesRecursively(targetDir);
+  const rawFiles = getFilesRecursively(targetDir);
+  const files = filterIgnoredFiles(rawFiles, targetDir);
 
   for (const filePath of files) {
     let content: string;

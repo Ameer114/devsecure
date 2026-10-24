@@ -8,6 +8,18 @@ export default function ConfigurationPage() {
   const [groqKey, setGroqKey] = useState("");
   const [localFolder, setLocalFolder] = useState("");
   const [mailId, setMailId] = useState("");
+  const [smtpHost, setSmtpHost] = useState("smtp.gmail.com");
+  const [smtpPort, setSmtpPort] = useState("465");
+  const [smtpUser, setSmtpUser] = useState("");
+  const [smtpPass, setSmtpPass] = useState("");
+  const [showSmtpPass, setShowSmtpPass] = useState(false);
+  const [isTestingEmail, setIsTestingEmail] = useState(false);
+  const [emailTestResult, setEmailTestResult] = useState<{
+    ok: boolean;
+    message: string;
+    previewUrl?: string;
+    isRealDelivery?: boolean;
+  } | null>(null);
   const [githubRepo, setGithubRepo] = useState("");
   const [branch, setBranch] = useState("main");
 
@@ -46,6 +58,8 @@ export default function ConfigurationPage() {
       sent: boolean;
       recipient: string;
       previewUrl?: string;
+      isRealDelivery?: boolean;
+      error?: string;
     };
     aiAnalysis?: {
       explanation?: string;
@@ -88,6 +102,18 @@ export default function ConfigurationPage() {
 
       const storedMail = localStorage.getItem("secureship_mail_id");
       if (storedMail) setMailId(storedMail);
+
+      const storedSmtpHost = localStorage.getItem("secureship_smtp_host");
+      if (storedSmtpHost) setSmtpHost(storedSmtpHost);
+
+      const storedSmtpPort = localStorage.getItem("secureship_smtp_port");
+      if (storedSmtpPort) setSmtpPort(storedSmtpPort);
+
+      const storedSmtpUser = localStorage.getItem("secureship_smtp_user");
+      if (storedSmtpUser) setSmtpUser(storedSmtpUser);
+
+      const storedSmtpPass = localStorage.getItem("secureship_smtp_pass");
+      if (storedSmtpPass) setSmtpPass(storedSmtpPass);
 
       const storedRepo = localStorage.getItem("secureship_github_repo");
       if (storedRepo) setGithubRepo(storedRepo);
@@ -161,6 +187,10 @@ export default function ConfigurationPage() {
     localStorage.setItem("secureship_local_folder", localFolder.trim());
     localStorage.setItem("secureship_github_repo", githubRepo.trim());
     localStorage.setItem("secureship_mail_id", mailId.trim());
+    localStorage.setItem("secureship_smtp_host", smtpHost.trim());
+    localStorage.setItem("secureship_smtp_port", smtpPort.trim());
+    localStorage.setItem("secureship_smtp_user", smtpUser.trim());
+    localStorage.setItem("secureship_smtp_pass", smtpPass.trim());
     localStorage.setItem("secureship_github_branch", branch.trim() || "main");
 
     localStorage.setItem("secureship_cloud_provider", cloudProvider);
@@ -174,7 +204,7 @@ export default function ConfigurationPage() {
     localStorage.setItem("secureship_ec2_appdir", ec2AppDir.trim());
     localStorage.setItem("secureship_ec2_command", ec2Command.trim());
 
-    setSavedStatus("Configuration and EC2 credentials saved in frontend storage!");
+    setSavedStatus("Configuration, SMTP, and EC2 credentials saved in frontend storage!");
     setTimeout(() => setSavedStatus(null), 3500);
   }
 
@@ -184,6 +214,10 @@ export default function ConfigurationPage() {
     localStorage.removeItem("secureship_local_folder");
     localStorage.removeItem("secureship_github_repo");
     localStorage.removeItem("secureship_mail_id");
+    localStorage.removeItem("secureship_smtp_host");
+    localStorage.removeItem("secureship_smtp_port");
+    localStorage.removeItem("secureship_smtp_user");
+    localStorage.removeItem("secureship_smtp_pass");
     localStorage.removeItem("secureship_github_branch");
     localStorage.removeItem("secureship_cloud_provider");
     localStorage.removeItem("secureship_cloud_webhook");
@@ -200,6 +234,11 @@ export default function ConfigurationPage() {
     setLocalFolder("");
     setGithubRepo("");
     setMailId("");
+    setSmtpHost("smtp.gmail.com");
+    setSmtpPort("465");
+    setSmtpUser("");
+    setSmtpPass("");
+    setEmailTestResult(null);
     setBranch("main");
     setCloudProvider("aws");
     setCloudWebhook("");
@@ -282,6 +321,63 @@ export default function ConfigurationPage() {
     }
   }
 
+  async function handleTestEmail() {
+    setIsTestingEmail(true);
+    setEmailTestResult(null);
+
+    const recipient = mailId.trim();
+    if (!recipient) {
+      setEmailTestResult({
+        ok: false,
+        message: "Please enter your Notification Mail ID first.",
+      });
+      setIsTestingEmail(false);
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/deploy/test-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipient,
+          smtpConfig:
+            smtpUser.trim() && smtpPass.trim()
+              ? {
+                  host: smtpHost.trim() || "smtp.gmail.com",
+                  port: Number(smtpPort) || 465,
+                  user: smtpUser.trim(),
+                  pass: smtpPass.trim(),
+                  from: `"SecureShip Security Gate" <${smtpUser.trim()}>`,
+                }
+              : undefined,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setEmailTestResult({
+          ok: true,
+          message: data.message,
+          previewUrl: data.previewUrl,
+          isRealDelivery: data.isRealDelivery,
+        });
+      } else {
+        setEmailTestResult({
+          ok: false,
+          message: data.error || "Failed to dispatch test email. Check your SMTP credentials.",
+        });
+      }
+    } catch (err) {
+      setEmailTestResult({
+        ok: false,
+        message: err instanceof Error ? err.message : "Failed to connect to email service.",
+      });
+    } finally {
+      setIsTestingEmail(false);
+    }
+  }
+
   async function handleSimulateSecret(action: "inject" | "cleanup") {
     if (action === "inject") {
       setIsSimulating(true);
@@ -357,6 +453,22 @@ export default function ConfigurationPage() {
       setEc2User("ec2-user");
     }
 
+    const effectiveGroqKey =
+      groqKey.trim() ||
+      (typeof window !== "undefined" ? localStorage.getItem("secureship_groq_key") : null) ||
+      undefined;
+
+    const effectiveSmtp =
+      smtpUser.trim() && smtpPass.trim()
+        ? {
+            host: smtpHost.trim() || "smtp.gmail.com",
+            port: Number(smtpPort) || 465,
+            user: smtpUser.trim(),
+            pass: smtpPass.trim(),
+            from: `"SecureShip Security Gate" <${smtpUser.trim()}>`,
+          }
+        : undefined;
+
     try {
       const res = await fetch("/api/git/push", {
         method: "POST",
@@ -367,7 +479,8 @@ export default function ConfigurationPage() {
           branch: branch.trim() || "main",
           commitMessage: commitMessage.trim(),
           alertEmail: mailId.trim() || undefined,
-          groqApiKey: groqKey.trim() || undefined,
+          groqApiKey: effectiveGroqKey,
+          smtpConfig: effectiveSmtp,
           cloudConfig: {
             provider: cloudProvider,
             webhookUrl: cloudWebhook.trim() || undefined,
@@ -504,12 +617,25 @@ export default function ConfigurationPage() {
 
           {/* 4. Groq API Key */}
           <div className="md:col-span-2">
-            <label className="block text-sm font-medium">Groq LLM API Key</label>
+            <label className="block text-sm font-medium flex items-center justify-between">
+              <span>Groq LLM API Key (Fast Llama 3.3 / GPT-OSS AI Remediations)</span>
+              {groqKey.trim() && (
+                <span className="text-[11px] font-mono text-ok flex items-center gap-1">
+                  <CheckCircle2 className="size-3" /> Active & Saved
+                </span>
+              )}
+            </label>
             <div className="relative mt-1">
               <input
                 type={showGroqKey ? "text" : "password"}
                 value={groqKey}
-                onChange={(e) => setGroqKey(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setGroqKey(val);
+                  if (typeof window !== "undefined") {
+                    localStorage.setItem("secureship_groq_key", val.trim());
+                  }
+                }}
                 placeholder="gsk_..."
                 className="block w-full rounded-md border border-line bg-bg px-3 py-2 pr-10 text-sm font-mono placeholder:text-muted/60"
               />
@@ -522,24 +648,227 @@ export default function ConfigurationPage() {
               </button>
             </div>
             <p className="mt-1 text-xs text-muted">
-              Get your key from <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-accent underline">console.groq.com</a>. Used directly by the dashboard to analyze findings with high-speed Llama 3.3.
+              Get your key from{" "}
+              <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="text-accent underline font-medium">
+                console.groq.com
+              </a>
+              . Automatically generates live security explanations citing the exact file, line number, and mitigation commands.
             </p>
           </div>
 
-          {/* 5. Notification Email */}
-          <div className="md:col-span-2">
-            <label className="block text-sm font-medium flex items-center gap-1.5">
-              <Mail className="size-4 text-accent" />
-              Notification Mail ID
-            </label>
-            <input
-              type="email"
-              value={mailId}
-              onChange={(e) => setMailId(e.target.value)}
-              placeholder="you@company.com"
-              className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm placeholder:text-muted/60"
-            />
-            <p className="mt-1 text-xs text-muted">Alerts sent here if release gate blocks due to exposed secrets.</p>
+          {/* 5. Notification Email & SMTP Configuration for Real Inbox Delivery */}
+          <div className="md:col-span-2 space-y-4 rounded-lg border border-line/70 bg-bg/50 p-4">
+            <div>
+              <label className="block text-sm font-medium flex items-center gap-1.5">
+                <Mail className="size-4 text-accent" />
+                Notification Mail ID (Recipient for Security Failure Alerts)
+              </label>
+              <input
+                type="email"
+                value={mailId}
+                onChange={(e) => {
+                  setMailId(e.target.value);
+                  if (typeof window !== "undefined") {
+                    localStorage.setItem("secureship_mail_id", e.target.value.trim());
+                  }
+                }}
+                placeholder="you@company.com"
+                className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm placeholder:text-muted/60"
+              />
+              <p className="mt-1 text-xs text-muted">
+                When a security gate holds or a leaked secret is detected, full remediation steps, file names, and line numbers are sent here.
+              </p>
+            </div>
+
+            {/* SMTP Settings */}
+            <div className="space-y-3 pt-3 border-t border-line/60">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1.5">
+                <div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-muted">
+                    SMTP Credentials (Required for Real Inbox Delivery)
+                  </h4>
+                  <p className="text-[11px] text-muted">
+                    Configure your Gmail or custom SMTP to receive actual emails in your personal inbox instead of sandbox previews.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 self-start sm:self-auto">
+                  <span className="text-[11px] text-muted">Presets:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSmtpHost("smtp.gmail.com");
+                      setSmtpPort("465");
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("secureship_smtp_host", "smtp.gmail.com");
+                        localStorage.setItem("secureship_smtp_port", "465");
+                      }
+                    }}
+                    className={`px-2 py-0.5 rounded text-xs border cursor-pointer ${
+                      smtpHost === "smtp.gmail.com" && smtpPort === "465"
+                        ? "border-accent bg-accent/15 text-accent font-semibold"
+                        : "border-line text-muted hover:text-ink"
+                    }`}
+                  >
+                    Gmail (SSL 465)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSmtpHost("smtp.gmail.com");
+                      setSmtpPort("587");
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("secureship_smtp_host", "smtp.gmail.com");
+                        localStorage.setItem("secureship_smtp_port", "587");
+                      }
+                    }}
+                    className={`px-2 py-0.5 rounded text-xs border cursor-pointer ${
+                      smtpHost === "smtp.gmail.com" && smtpPort === "587"
+                        ? "border-accent bg-accent/15 text-accent font-semibold"
+                        : "border-line text-muted hover:text-ink"
+                    }`}
+                  >
+                    Gmail (TLS 587)
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-medium">SMTP Server Host</label>
+                  <input
+                    type="text"
+                    value={smtpHost}
+                    onChange={(e) => {
+                      setSmtpHost(e.target.value);
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("secureship_smtp_host", e.target.value.trim());
+                      }
+                    }}
+                    placeholder="smtp.gmail.com"
+                    className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-1.5 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium">SMTP Port</label>
+                  <input
+                    type="text"
+                    value={smtpPort}
+                    onChange={(e) => {
+                      setSmtpPort(e.target.value);
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("secureship_smtp_port", e.target.value.trim());
+                      }
+                    }}
+                    placeholder="465 or 587"
+                    className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-1.5 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium">SMTP User / Email</label>
+                  <input
+                    type="text"
+                    value={smtpUser}
+                    onChange={(e) => {
+                      setSmtpUser(e.target.value);
+                      if (typeof window !== "undefined") {
+                        localStorage.setItem("secureship_smtp_user", e.target.value.trim());
+                      }
+                    }}
+                    placeholder="your-email@gmail.com"
+                    className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-1.5 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium">SMTP Password / App Password</label>
+                  <div className="relative mt-1">
+                    <input
+                      type={showSmtpPass ? "text" : "password"}
+                      value={smtpPass}
+                      onChange={(e) => {
+                        setSmtpPass(e.target.value);
+                        if (typeof window !== "undefined") {
+                          localStorage.setItem("secureship_smtp_pass", e.target.value.trim());
+                        }
+                      }}
+                      placeholder="16-character Google App Password"
+                      className="block w-full rounded-md border border-line bg-bg px-3 py-1.5 pr-8 text-xs font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowSmtpPass(!showSmtpPass)}
+                      className="absolute right-2 top-2 text-muted hover:text-ink cursor-pointer"
+                    >
+                      {showSmtpPass ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pt-1">
+                <p className="text-[11px] text-muted">
+                  💡 <strong>Gmail tip:</strong> Create an App Password at{" "}
+                  <a
+                    href="https://myaccount.google.com/apppasswords"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-accent underline font-medium"
+                  >
+                    myaccount.google.com/apppasswords
+                  </a>{" "}
+                  (select App &ldquo;Other&rdquo; &rarr; name &ldquo;SecureShip&rdquo;).
+                </p>
+                <button
+                  type="button"
+                  onClick={handleTestEmail}
+                  disabled={isTestingEmail || !mailId.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-accent/40 bg-accent/10 px-3 py-1 text-xs font-semibold text-accent hover:bg-accent/20 disabled:opacity-40 cursor-pointer self-start sm:self-auto shrink-0"
+                >
+                  {isTestingEmail ? (
+                    <>
+                      <Loader2 className="size-3.5 animate-spin" />
+                      Sending Test Email…
+                    </>
+                  ) : (
+                    <>
+                      <Mail className="size-3.5" />
+                      Send Test Alert Email
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {emailTestResult && (
+                <div
+                  className={`rounded-md border p-3 text-xs ${
+                    emailTestResult.ok
+                      ? "border-ok/30 bg-ok/10 text-ok"
+                      : "border-bad/30 bg-bad/10 text-bad"
+                  }`}
+                >
+                  <div className="font-semibold flex items-center gap-1.5">
+                    {emailTestResult.ok ? (
+                      <CheckCircle2 className="size-3.5 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="size-3.5 shrink-0" />
+                    )}
+                    <span>{emailTestResult.ok ? "Email Test Dispatched" : "Email Test Failed"}</span>
+                  </div>
+                  <p className="mt-1 font-mono text-[11px]">{emailTestResult.message}</p>
+                  {emailTestResult.previewUrl && (
+                    <div className="mt-1.5">
+                      <a
+                        href={emailTestResult.previewUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-accent hover:underline font-semibold"
+                      >
+                        Open Sandbox Email Preview <ExternalLink className="size-3" />
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </form>
@@ -959,45 +1288,70 @@ export default function ConfigurationPage() {
               <p>{pipelineResult.message}</p>
 
               {pipelineResult.emailAlert && (
-                <div className="rounded border border-ink/10 bg-surface/80 p-2.5 text-xs text-ink flex items-center justify-between">
-                  <span>
-                    📧 <strong>Alert Email:</strong> {pipelineResult.emailAlert.sent ? "Sent successfully" : "Queued"} to{" "}
-                    <code>{pipelineResult.emailAlert.recipient}</code>
-                  </span>
+                <div className="rounded border border-ink/10 bg-surface/80 p-3 text-xs text-ink flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    {pipelineResult.emailAlert.sent ? (
+                      <CheckCircle2 className="size-4 text-ok shrink-0" />
+                    ) : (
+                      <AlertTriangle className="size-4 text-bad shrink-0" />
+                    )}
+                    <span>
+                      <strong>Alert Email:</strong>{" "}
+                      {pipelineResult.emailAlert.isRealDelivery
+                        ? `✅ Delivered to real inbox: ${pipelineResult.emailAlert.recipient}`
+                        : pipelineResult.emailAlert.sent
+                        ? `Captured in Ethereal sandbox: ${pipelineResult.emailAlert.recipient}`
+                        : `Failed to deliver: ${pipelineResult.emailAlert.error || "Unknown error"}`}
+                    </span>
+                  </div>
                   {pipelineResult.emailAlert.previewUrl && (
                     <a
                       href={pipelineResult.emailAlert.previewUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-accent hover:underline font-medium"
+                      className="inline-flex items-center gap-1 text-accent hover:underline font-semibold shrink-0"
                     >
-                      View Email Preview <ExternalLink className="size-3" />
+                      View Sandbox Preview <ExternalLink className="size-3" />
                     </a>
                   )}
                 </div>
               )}
 
-              {pipelineResult.aiAnalysis?.explanation && (
-                <div className="rounded border border-accent/20 bg-accent/5 p-3 text-xs text-ink space-y-1">
+              {pipelineResult.aiAnalysis?.explanation ? (
+                <div className="rounded border border-accent/30 bg-accent/10 p-3.5 text-xs text-ink space-y-2">
                   <div className="font-semibold text-accent flex items-center gap-1.5">
-                    <Sparkles className="size-3.5" />
-                    AI Security Remediation (Groq Llama 3.3)
+                    <Sparkles className="size-4" />
+                    Live AI Security Remediation (Groq Llama 3.3 / GPT-OSS)
                   </div>
-                  <p className="text-muted">{pipelineResult.aiAnalysis.explanation}</p>
+                  <p className="text-ink leading-relaxed">{pipelineResult.aiAnalysis.explanation}</p>
                   {pipelineResult.aiAnalysis.suggestion && (
-                    <p className="font-medium text-ink">
-                      <strong>Fix:</strong> {pipelineResult.aiAnalysis.suggestion}
-                    </p>
+                    <div className="rounded bg-bg/80 p-2.5 border border-line font-mono text-[11px] text-ink whitespace-pre-wrap">
+                      <strong className="text-accent font-sans">Fix Instructions:</strong>
+                      <br />
+                      {pipelineResult.aiAnalysis.suggestion}
+                    </div>
                   )}
                 </div>
-              )}
+              ) : pipelineResult.blocked ? (
+                <div className="rounded border border-bad/20 bg-bad/5 p-3 text-xs text-bad">
+                  <p>
+                    ⚠️ <strong>AI Analysis Note:</strong> To generate dynamic AI remediation with exact file &amp; line number instructions, verify your Groq API Key above.
+                  </p>
+                </div>
+              ) : null}
 
               {pipelineResult.reasons && pipelineResult.reasons.length > 0 && (
-                <ul className="list-disc pl-5 text-xs space-y-1">
-                  {pipelineResult.reasons.map((r, i) => (
-                    <li key={i}>{r}</li>
-                  ))}
-                </ul>
+                <div className="space-y-1.5 pt-1">
+                  <div className="text-xs font-semibold text-bad">Blocked Security Findings:</div>
+                  <ul className="space-y-1 pl-1">
+                    {pipelineResult.reasons.map((r, i) => (
+                      <li key={i} className="flex items-center gap-2 text-xs font-mono bg-bad/10 text-bad rounded px-2 py-1 border border-bad/20">
+                        <ShieldAlert className="size-3.5 shrink-0" />
+                        <span>{r}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
             </div>
           )}

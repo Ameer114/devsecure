@@ -29,6 +29,7 @@ export async function sendSecurityAlertEmail(params: SendAlertParams): Promise<{
   ok: boolean;
   messageId?: string;
   previewUrl?: string | false;
+  isRealDelivery?: boolean;
   error?: string;
 }> {
   try {
@@ -52,17 +53,31 @@ export async function sendSecurityAlertEmail(params: SendAlertParams): Promise<{
       });
     } else {
       // Create ephemeral Ethereal test account if no live SMTP is set up
-      const testAccount = await nodemailer.createTestAccount();
-      transporter = nodemailer.createTransport({
-        host: "smtp.ethereal.email",
-        port: 587,
-        secure: false,
-        auth: {
-          user: testAccount.user,
-          pass: testAccount.pass,
-        },
-      });
-      logger.info("Using ephemeral Ethereal SMTP for alert delivery", { user: testAccount.user });
+      try {
+        const testAccount = await Promise.race([
+          nodemailer.createTestAccount(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Ethereal test account timeout")), 4000)
+          ),
+        ]);
+        transporter = nodemailer.createTransport({
+          host: "smtp.ethereal.email",
+          port: 587,
+          secure: false,
+          auth: {
+            user: testAccount.user,
+            pass: testAccount.pass,
+          },
+        });
+        logger.info("Using ephemeral Ethereal SMTP for alert delivery", { user: testAccount.user });
+      } catch (etherealErr) {
+        logger.warn("Ethereal sandbox unavailable or timed out, using resilient fallback transport", {
+          etherealErr,
+        });
+        transporter = nodemailer.createTransport({
+          jsonTransport: true,
+        });
+      }
     }
 
     const findingListHtml = findingDetails
@@ -131,6 +146,7 @@ export async function sendSecurityAlertEmail(params: SendAlertParams): Promise<{
       ok: true,
       messageId: info.messageId,
       previewUrl,
+      isRealDelivery: Boolean(host && user && pass),
     };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);

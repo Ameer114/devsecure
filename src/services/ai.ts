@@ -17,72 +17,115 @@ export async function generateFindingExplanation(
   apiKeyOverride?: string
 ): Promise<FindingExplanation> {
   const env = getEnv();
-  const apiKey = apiKeyOverride?.trim() || env.GROQ_API_KEY;
+  const apiKey =
+    apiKeyOverride?.trim() ||
+    env.GROQ_API_KEY ||
+    (typeof process !== "undefined" ? process.env.GROQ_API_KEY : undefined);
 
   if (!apiKey) {
     return {
-      explanation: `Security finding "${finding.title}" detected at ${finding.filePath ?? "source code"}${finding.startLine ? `:${finding.startLine}` : ""}. Hardcoded credentials in source code allow anyone with repository access to compromise infrastructure.`,
-      suggestion: `Remove the exposed key from ${finding.filePath ?? "your file"}. Move the secret to .env (ensure .env is in .gitignore) or use environment variables. If this key has been active, rotate it immediately in the provider console.`,
+      explanation: `⚠️ No Groq API Key provided. To get live AI security analysis from Llama 3.3, enter your Groq API Key (gsk_...) in the Configuration page.`,
+      suggestion: `Security finding "${finding.title}" is located in ${finding.filePath ?? "your code"}${finding.startLine ? ` at line ${finding.startLine}` : ""}. Remove the hardcoded secret, store it in .env, and ensure .env is listed in .gitignore.`,
     };
   }
 
-  const prompt = `You are a cybersecurity expert analyzing a software security finding.
-Scanner: ${finding.scanner}
-Rule ID: ${finding.ruleId}
-Title: ${finding.title}
-File location: ${finding.filePath ?? "N/A"}${finding.startLine ? `:${finding.startLine}` : ""}
+  const prompt = `You are an expert application security engineer reviewing code for a security release gate violation.
+The automated scanner intercepted this security finding BEFORE pushing to GitHub:
+- Scanner: ${finding.scanner}
+- Rule: ${finding.ruleId}
+- Title: ${finding.title}
+- Location: ${finding.filePath ?? "Unknown file"}${finding.startLine ? ` at line ${finding.startLine}` : ""}
 
-Provide a concise, practical analysis.
+Provide a detailed, professional AI security review:
+1. "explanation": Specifically cite the exact file (${finding.filePath ?? "code"}) and line (${finding.startLine ?? "N/A"}). Explain what attackers could do with this specific credential or vulnerability if it was pushed to GitHub.
+2. "suggestion": Concrete, step-by-step instructions for the developer on how to fix this exact file. Explain how to move this secret into .env, ensure .env is in .gitignore, access it via process.env, and rotate the token in the provider console.
+
 Respond ONLY with valid JSON in this exact structure:
 {
-  "explanation": "1-2 sentences explaining why this finding is a security risk",
-  "suggestion": "1-2 sentences with concrete remediation steps or commands"
+  "explanation": "...",
+  "suggestion": "..."
 }`;
 
+  // Dynamic model discovery with robust fallback list
+  let candidateModels = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "qwen/qwen3.8-27b",
+  ];
+
   try {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages: [
-          {
-            role: "system",
-            content: "You are an expert application security engineer. Respond strictly in valid JSON.",
-          },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-      }),
+    const modelsRes = await fetch("https://api.groq.com/openai/v1/models", {
+      headers: { Authorization: `Bearer ${apiKey}` },
     });
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      logger.error("Groq API call failed", { status: res.status, errBody });
-      return {
-        explanation: `Groq API error (${res.status}): ${res.statusText}`,
-        suggestion: "Verify your GROQ_API_KEY in the Configuration page or .env.local.",
+    if (modelsRes.ok) {
+      const modelsData = (await modelsRes.json()) as {
+        data?: Array<{ id: string; active?: boolean }>;
       };
+      const activeIds = new Set(
+        modelsData.data?.filter((m) => m.active !== false).map((m) => m.id) || []
+      );
+      const matched = candidateModels.filter((id) => activeIds.has(id));
+      const otherChatModels = Array.from(activeIds).filter(
+        (id) => !id.includes("whisper") && !id.includes("guard")
+      );
+      if (matched.length > 0 || otherChatModels.length > 0) {
+        candidateModels = [...matched, ...otherChatModels];
+      }
     }
-
-    const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-    const rawContent = json.choices?.[0]?.message?.content ?? "";
-    const cleanJson = rawContent.replace(/```json\n?|\n?```/g, "").trim();
-    const parsed = JSON.parse(cleanJson) as { explanation?: string; suggestion?: string };
-
-    return {
-      explanation: parsed.explanation ?? "No explanation returned by Groq.",
-      suggestion: parsed.suggestion ?? "No remediation suggestion returned by Groq.",
-    };
-  } catch (err) {
-    logger.error("Failed to generate finding explanation with Groq", { err });
-    return {
-      explanation: "Failed to generate AI explanation.",
-      suggestion: "Check server logs for error details.",
-    };
+  } catch (discoveryErr) {
+    logger.warn("Model discovery skipped, using default model list", { discoveryErr });
   }
+
+  for (const model of candidateModels) {
+    try {
+      const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are an expert cybersecurity and DevSecOps engineer. Always respond strictly in valid JSON.",
+            },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        logger.warn(`Groq request with ${model} returned status ${res.status}`, { errText });
+        continue; // Try next available model
+      }
+
+      const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+      const rawContent = json.choices?.[0]?.message?.content ?? "";
+      const cleanJson = rawContent.replace(/```json\n?|\n?```/g, "").trim();
+      const parsed = JSON.parse(cleanJson) as { explanation?: string; suggestion?: string };
+
+      if (parsed.explanation && parsed.suggestion) {
+        return {
+          explanation: parsed.explanation,
+          suggestion: parsed.suggestion,
+        };
+      }
+    } catch (err) {
+      logger.warn(`Failed Groq call on model ${model}`, { err });
+      continue;
+    }
+  }
+
+  return {
+    explanation: `Groq AI model execution error. Intercepted security violation in ${finding.filePath ?? "code"}:${finding.startLine ?? 1}.`,
+    suggestion: `Move the credential to .env, verify .gitignore has .env, and check your Groq API console permissions at console.groq.com.`,
+  };
 }
