@@ -103,21 +103,181 @@ export async function POST(req: Request) {
       }
     }
 
-    // 3. Stage and commit any pending changes
+    // 3. Register or retrieve repository in store
+    let targetName = body.repoFullName;
+    if (!targetName && remoteOrigin) {
+      const parsed = parseOwnerAndRepo(remoteOrigin);
+      if (parsed) targetName = `${parsed.owner}/${parsed.repo}`;
+    }
+    if (!targetName) targetName = path.basename(cwd) || "local/project";
+
+    let repo = store.repositories.find((r) => r.fullName.toLowerCase() === targetName?.toLowerCase());
+    if (!repo) {
+      repo = store.createRepository({
+        fullName: targetName,
+        defaultBranch: branch,
+        ownerEmail: body.alertEmail?.trim() || "developer@local",
+      });
+    }
+
+    let commitSha = "uncommitted";
+    try {
+      const { stdout: shaOut } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd });
+      commitSha = shaOut.trim();
+    } catch {
+      // Empty repo or uncommitted
+    }
+
+    // 4. MANDATORY PRE-PUSH SECURITY SCAN: Check ALL repository files BEFORE pushing to GitHub!
+    const runId = `run_${Date.now()}`;
+    const scanFindings = runSecurityScan(cwd, repo.id, runId, repo.fullName);
+
+    // Save findings into store
+    for (const f of scanFindings) {
+      store.findings.unshift(f);
+    }
+
+    const blockingFindings = scanFindings.filter(
+      (f) => f.severity === "CRITICAL" || f.severity === "HIGH" || f.kind === "SECRET"
+    );
+    const isGateBlocked = blockingFindings.length > 0;
+
+    // 5. IF GATE IS BLOCKED: STOP IMMEDIATELY! DO NOT PUSH TO GITHUB! DO NOT DEPLOY TO AWS!
+    if (isGateBlocked) {
+      const recipientEmail = body.alertEmail?.trim() || repo.owner.email || "developer@local";
+      const notifId = `notif_${Date.now()}`;
+
+      // Automatically generate AI explanation using Groq if key is available
+      let aiAnalysis: { explanation?: string; suggestion?: string } = {};
+      if (blockingFindings[0]) {
+        try {
+          aiAnalysis = await generateFindingExplanation(blockingFindings[0], body.groqApiKey);
+          blockingFindings[0].aiExplanation = aiAnalysis.explanation;
+          blockingFindings[0].aiSuggestion = aiAnalysis.suggestion;
+        } catch (aiErr) {
+          logger.warn("Auto AI explanation skipped during gate blockage", { aiErr });
+        }
+      }
+
+      // Dispatch real email alert to the user-provided recipient
+      const emailResult = await sendSecurityAlertEmail({
+        to: recipientEmail,
+        subject: `[SecureShip ALERT] Pre-push gate BLOCKED for ${repo.fullName}`,
+        repoFullName: repo.fullName,
+        commitSha,
+        branch,
+        findingDetails: blockingFindings.map((f) => ({
+          ruleId: f.ruleId,
+          title: f.title,
+          filePath: f.filePath,
+          startLine: f.startLine,
+          severity: f.severity,
+        })),
+        aiExplanation: aiAnalysis.explanation,
+        aiSuggestion: aiAnalysis.suggestion,
+        smtpConfig: body.smtpConfig,
+      });
+
+      const reasons = blockingFindings.map((f) => `${f.title} in ${f.filePath}:${f.startLine}`);
+
+      const run = store.createRun({
+        repositoryId: repo.id,
+        branch,
+        commitSha,
+        actor: "ci-cd-pipeline",
+        status: "BLOCKED",
+        reasons,
+      });
+
+      const decision: PolicyDecisionRecord = {
+        id: `pol_${Date.now()}`,
+        runId: run.id,
+        policyVersion: "1.0",
+        outcome: "BLOCK",
+        reasons,
+        createdAt: new Date(),
+      };
+      store.policyDecisions.unshift(decision);
+
+      store.notifications.unshift({
+        id: notifId,
+        repositoryId: repo.id,
+        runId: run.id,
+        findingId: blockingFindings[0]?.id || null,
+        channel: "EMAIL",
+        recipient: recipientEmail,
+        subject: `[SecureShip ALERT] Pre-push gate BLOCKED for ${repo.fullName}`,
+        status: emailResult.ok ? "SENT" : "FAILED",
+        error: emailResult.error,
+        createdAt: new Date(),
+        repository: { fullName: repo.fullName, isDemo: false },
+      });
+
+      await recordAudit({
+        actor: "security-gate",
+        action: "pipeline.blocked_pre_push",
+        entityType: "PipelineRun",
+        entityId: run.id,
+        repositoryId: repo.id,
+        metadata: {
+          commitSha: commitSha.slice(0, 7),
+          findingsCount: scanFindings.length,
+          reasons,
+          alertEmailSent: emailResult.ok,
+          previewUrl: emailResult.previewUrl || undefined,
+          pushedToRemote: false,
+          deployed: false,
+        },
+      });
+
+      return Response.json({
+        ok: false,
+        blocked: true,
+        pushedToRemote: false,
+        deployed: false,
+        commitSha: commitSha.slice(0, 7),
+        findingsCount: scanFindings.length,
+        blockingCount: blockingFindings.length,
+        firstFinding: {
+          title: blockingFindings[0]?.title,
+          filePath: blockingFindings[0]?.filePath,
+          startLine: blockingFindings[0]?.startLine,
+          ruleId: blockingFindings[0]?.ruleId,
+        },
+        reasons,
+        emailAlert: {
+          sent: emailResult.ok,
+          recipient: recipientEmail,
+          previewUrl: emailResult.previewUrl || undefined,
+        },
+        aiAnalysis: aiAnalysis.explanation ? aiAnalysis : undefined,
+        message: `🛑 PRE-PUSH SECURITY GATE HELD! Push to GitHub aborted. Exposed secret detected in ${blockingFindings[0]?.filePath}:${blockingFindings[0]?.startLine}. Code was NOT pushed to GitHub and NOT deployed to AWS. Alert email ${emailResult.ok ? "sent" : "queued"} to ${recipientEmail}.`,
+      });
+    }
+
+    // 6. ZERO VULNERABILITIES: Code is completely safe! Now stage and commit pending changes
     const { stdout: statusOut } = await execFileAsync("git", ["status", "--porcelain"], { cwd });
     if (statusOut.trim().length > 0) {
       await execFileAsync("git", ["add", "-A"], { cwd });
       await execFileAsync("git", ["commit", "-m", commitMessage], { cwd });
     }
 
-    // 4. Retrieve latest commit hash and message
-    const { stdout: shaOut } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd });
-    const commitSha = shaOut.trim();
+    try {
+      const { stdout: shaOut } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd });
+      commitSha = shaOut.trim();
+    } catch {
+      // ignore
+    }
 
-    const { stdout: logOut } = await execFileAsync("git", ["log", "-1", "--pretty=%s"], { cwd });
-    const latestMessage = logOut.trim();
+    let latestMessage = commitMessage;
+    try {
+      const { stdout: logOut } = await execFileAsync("git", ["log", "-1", "--pretty=%s"], { cwd });
+      latestMessage = logOut.trim();
+    } catch {
+      // ignore
+    }
 
-    // 5. Push to GitHub using system Git CLI
+    // 7. Push clean code to GitHub using system Git CLI
     let pushedToRemote = false;
     if (remoteOrigin) {
       try {
@@ -137,48 +297,14 @@ export async function POST(req: Request) {
       }
     }
 
-    // 6. Register or retrieve repository in store
-    let targetName = body.repoFullName;
-    if (!targetName && remoteOrigin) {
-      const parsed = parseOwnerAndRepo(remoteOrigin);
-      if (parsed) targetName = `${parsed.owner}/${parsed.repo}`;
-    }
-    if (!targetName) targetName = path.basename(cwd) || "local/project";
-
-    let repo = store.repositories.find((r) => r.fullName.toLowerCase() === targetName?.toLowerCase());
-    if (!repo) {
-      repo = store.createRepository({
-        fullName: targetName,
-        defaultBranch: branch,
-        ownerEmail: "developer@local",
-      });
-    }
-
-    // 7. REAL SECURITY SCANNING: Check repository files for exposed secrets and vulnerabilities
-    const runId = `run_${Date.now()}`;
-    const scanFindings = runSecurityScan(cwd, repo.id, runId, repo.fullName);
-
-    // Save any findings into store
-    for (const f of scanFindings) {
-      store.findings.unshift(f);
-    }
-
-    const blockingFindings = scanFindings.filter(
-      (f) => f.severity === "CRITICAL" || f.severity === "HIGH" || f.kind === "SECRET"
-    );
-    const isGateBlocked = blockingFindings.length > 0;
-
-    // 8. Deterministic Policy Gate Decision
-    const reasons = isGateBlocked
-      ? blockingFindings.map((f) => `${f.title} in ${f.filePath}:${f.startLine}`)
-      : ["All security checks passed. Zero exposed secrets or critical vulnerabilities."];
-
+    // 8. Deterministic Policy Gate Decision: ALLOW
+    const reasons = ["All security checks passed. Zero exposed secrets or critical vulnerabilities."];
     const run = store.createRun({
       repositoryId: repo.id,
       branch,
       commitSha,
       actor: "ci-cd-pipeline",
-      status: isGateBlocked ? "BLOCKED" : "PASSED",
+      status: "PASSED",
       reasons,
     });
 
@@ -186,94 +312,13 @@ export async function POST(req: Request) {
       id: `pol_${Date.now()}`,
       runId: run.id,
       policyVersion: "1.0",
-      outcome: isGateBlocked ? "BLOCK" : "ALLOW",
+      outcome: "ALLOW",
       reasons,
       createdAt: new Date(),
     };
     store.policyDecisions.unshift(decision);
 
-    // If gate is blocked, queue & dispatch alert notification and STOP deployment!
-    if (isGateBlocked) {
-      const recipientEmail = body.alertEmail?.trim() || repo.owner.email || "developer@local";
-      const notifId = `notif_${Date.now()}`;
-
-      // Automatically generate AI explanation using Groq if key is available
-      let aiAnalysis: { explanation?: string; suggestion?: string } = {};
-      if (blockingFindings[0]) {
-        try {
-          aiAnalysis = await generateFindingExplanation(blockingFindings[0], body.groqApiKey);
-          blockingFindings[0].aiExplanation = aiAnalysis.explanation;
-          blockingFindings[0].aiSuggestion = aiAnalysis.suggestion;
-        } catch (aiErr) {
-          logger.warn("Auto AI explanation skipped during gate blockage", { aiErr });
-        }
-      }
-
-      // Dispatch real email alert
-      const emailResult = await sendSecurityAlertEmail({
-        to: recipientEmail,
-        subject: `[SecureShip ALERT] Release gate BLOCKED for ${repo.fullName}`,
-        repoFullName: repo.fullName,
-        commitSha,
-        branch,
-        findingDetails: blockingFindings.map((f) => ({
-          ruleId: f.ruleId,
-          title: f.title,
-          filePath: f.filePath,
-          startLine: f.startLine,
-          severity: f.severity,
-        })),
-        aiExplanation: aiAnalysis.explanation,
-        aiSuggestion: aiAnalysis.suggestion,
-        smtpConfig: body.smtpConfig,
-      });
-
-      store.notifications.unshift({
-        id: notifId,
-        repositoryId: repo.id,
-        runId: run.id,
-        findingId: blockingFindings[0]?.id || null,
-        channel: "EMAIL",
-        recipient: recipientEmail,
-        subject: `[SecureShip ALERT] Release gate BLOCKED for ${repo.fullName}`,
-        status: emailResult.ok ? "SENT" : "FAILED",
-        error: emailResult.error,
-        createdAt: new Date(),
-        repository: { fullName: repo.fullName, isDemo: false },
-      });
-
-      await recordAudit({
-        actor: "security-gate",
-        action: "pipeline.blocked",
-        entityType: "PipelineRun",
-        entityId: run.id,
-        repositoryId: repo.id,
-        metadata: {
-          commitSha: commitSha.slice(0, 7),
-          findingsCount: scanFindings.length,
-          reasons,
-          alertEmailSent: emailResult.ok,
-          previewUrl: emailResult.previewUrl || undefined,
-        },
-      });
-
-      return Response.json({
-        ok: false,
-        blocked: true,
-        commitSha: commitSha.slice(0, 7),
-        findingsCount: scanFindings.length,
-        reasons,
-        emailAlert: {
-          sent: emailResult.ok,
-          recipient: recipientEmail,
-          previewUrl: emailResult.previewUrl || undefined,
-        },
-        aiAnalysis: aiAnalysis.explanation ? aiAnalysis : undefined,
-        message: `Security Release Gate HELD! ${scanFindings.length} security finding(s) detected. Cloud deployment halted. Alert email ${emailResult.ok ? "sent" : "queued"} to ${recipientEmail}.`,
-      });
-    }
-
-    // 9. SECURITY PASSED: Build & Deploy to Cloud!
+    // 9. Build & Deploy to Cloud!
     const deployResult = await triggerCloudDeployment({
       repoId: repo.id,
       repoFullName: repo.fullName,
@@ -308,7 +353,7 @@ export async function POST(req: Request) {
       pushedToRemote,
       deployment: deployResult.deployment,
       message: deployResult.ok
-        ? (deployResult.message || `Security scan passed! Pushed to GitHub and deployed to Cloud (${deployResult.deployment?.environment || "production"}).`)
+        ? (deployResult.message || `Security scan passed! Clean code pushed to GitHub and deployed to Cloud (${deployResult.deployment?.environment || "production"}).`)
         : `Security scan passed & pushed to GitHub, but Cloud Deployment was not completed: ${deployResult.message}`,
     });
   } catch (err) {

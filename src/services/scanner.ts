@@ -26,6 +26,16 @@ const SECURITY_RULES: SecretRule[] = [
     suggestion: "Immediately deactivate and delete this key in AWS IAM. Use IAM Roles or AWS Secrets Manager instead.",
   },
   {
+    id: "aws-secret-access-key",
+    title: "AWS Secret Access Key exposed",
+    scanner: "GITLEAKS",
+    kind: "SECRET",
+    severity: "CRITICAL",
+    pattern: /(?:aws_secret_access_key|aws_secret_key)\s*[:=]\s*['"]?([A-Za-z0-9/+=]{40})['"]?/i,
+    explanation: "AWS Secret Access Keys grant direct administrative and programmatic access to your AWS cloud resources.",
+    suggestion: "Immediately deactivate and delete this key in AWS IAM. Use IAM Roles or AWS Secrets Manager instead.",
+  },
+  {
     id: "private-key-file",
     title: "Private cryptographic key exposed in source",
     scanner: "GITLEAKS",
@@ -46,13 +56,33 @@ const SECURITY_RULES: SecretRule[] = [
     suggestion: "Revoke the token in GitHub Settings > Developer settings > Personal access tokens immediately.",
   },
   {
+    id: "ai-api-key",
+    title: "AI Provider API Key (Groq / OpenAI) exposed",
+    scanner: "GITLEAKS",
+    kind: "SECRET",
+    severity: "CRITICAL",
+    pattern: /\b(gsk_[a-zA-Z0-9]{48,}|sk-[a-zA-Z0-9]{32,})\b/,
+    explanation: "Exposed AI API keys allow attackers to consume compute quotas, access private models, or incur steep billing costs.",
+    suggestion: "Revoke this key in your Groq or OpenAI console immediately and store it in protected server environment variables.",
+  },
+  {
+    id: "db-credential-url",
+    title: "Database connection string with embedded password exposed",
+    scanner: "GITLEAKS",
+    kind: "SECRET",
+    severity: "CRITICAL",
+    pattern: /\b(?:postgres|postgresql|mysql|mongodb(?:\+srv)?):\/\/[^:]+:([^@]+)@/i,
+    explanation: "Database URLs containing plaintext passwords allow attackers to connect directly to your persistent storage.",
+    suggestion: "Never commit database connection strings to git. Use environment variables on your deployment host.",
+  },
+  {
     id: "generic-api-key",
-    title: "Hardcoded API Key / Token",
+    title: "Hardcoded API Key / Secret Token",
     scanner: "GITLEAKS",
     kind: "SECRET",
     severity: "HIGH",
-    pattern: /(?:api[_-]?key|secret[_-]?key|auth[_-]?token)\s*[:=]\s*['"]([a-zA-Z0-9_\-]{20,})['"]/i,
-    explanation: "Hardcoded credentials in code can be extracted by anyone with read access to the repository.",
+    pattern: /(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|jwt[_-]?secret)\s*[:=]\s*['"]?([a-zA-Z0-9_\-/+=]{16,})['"]?/i,
+    explanation: "Hardcoded credentials in code or config can be extracted by anyone with read access to the repository.",
     suggestion: "Store this secret in an environment variable or a secure secret manager. Never commit it to git.",
   },
   {
@@ -156,8 +186,8 @@ export function runSecurityScan(
 
     const relativePath = path.relative(targetDir, filePath).replace(/\\/g, "/");
 
-    // Don't scan our own scanner definitions to prevent false positives
-    if (relativePath.includes("scanner.ts")) continue;
+    // Don't scan our own scanner definitions or demo mock generators to prevent false positives
+    if (relativePath.includes("scanner.ts") || relativePath.includes("simulate-leak") || relativePath.includes(".test.ts")) continue;
 
     const lines = content.split("\n");
 

@@ -52,4 +52,26 @@ describe("Security Scanner & Zero-Secret Gate", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("detects exposed secrets in .env files without quotes and tracks exact line", () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "secureship-env-"));
+    const envFile = path.join(tmpDir, ".env");
+    fs.writeFileSync(
+      envFile,
+      'PORT=3000\nAWS_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nNODE_ENV=production\n',
+      "utf-8"
+    );
+
+    try {
+      const findings = runSecurityScan(tmpDir, "repo-1", "run-1", "test/repo");
+      expect(findings.length).toBeGreaterThan(0);
+      const secretFinding = findings.find((f) => f.ruleId === "aws-secret-access-key");
+      expect(secretFinding).toBeDefined();
+      expect(secretFinding?.filePath).toBe(".env");
+      expect(secretFinding?.startLine).toBe(2);
+      expect(secretFinding?.severity).toBe("CRITICAL");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

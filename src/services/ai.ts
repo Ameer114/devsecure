@@ -21,8 +21,8 @@ export async function generateFindingExplanation(
 
   if (!apiKey) {
     return {
-      explanation: "Groq API key is not configured.",
-      suggestion: "Please enter your Groq API key in the Configuration page.",
+      explanation: `Security finding "${finding.title}" detected at ${finding.filePath ?? "source code"}${finding.startLine ? `:${finding.startLine}` : ""}. Hardcoded credentials in source code allow anyone with repository access to compromise infrastructure.`,
+      suggestion: `Remove the exposed key from ${finding.filePath ?? "your file"}. Move the secret to .env (ensure .env is in .gitignore) or use environment variables. If this key has been active, rotate it immediately in the provider console.`,
     };
   }
 
