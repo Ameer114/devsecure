@@ -35,51 +35,6 @@ export async function sendSecurityAlertEmail(params: SendAlertParams): Promise<{
   try {
     const { to, subject, repoFullName, commitSha, branch, findingDetails, aiExplanation, aiSuggestion } = params;
 
-    // Use environment variables or provided config
-    const host = params.smtpConfig?.host || process.env.SMTP_HOST;
-    const port = params.smtpConfig?.port || Number(process.env.SMTP_PORT) || 587;
-    const user = params.smtpConfig?.user || process.env.SMTP_USER;
-    const pass = params.smtpConfig?.pass || process.env.SMTP_PASS;
-    const from = params.smtpConfig?.from || process.env.SMTP_FROM || `"SecureShip Security Gate" <alerts@secureship.local>`;
-
-    let transporter: Transporter;
-
-    if (host && user && pass) {
-      transporter = nodemailer.createTransport({
-        host,
-        port,
-        secure: port === 465,
-        auth: { user, pass },
-      });
-    } else {
-      // Create ephemeral Ethereal test account if no live SMTP is set up
-      try {
-        const testAccount = await Promise.race([
-          nodemailer.createTestAccount(),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Ethereal test account timeout")), 4000)
-          ),
-        ]);
-        transporter = nodemailer.createTransport({
-          host: "smtp.ethereal.email",
-          port: 587,
-          secure: false,
-          auth: {
-            user: testAccount.user,
-            pass: testAccount.pass,
-          },
-        });
-        logger.info("Using ephemeral Ethereal SMTP for alert delivery", { user: testAccount.user });
-      } catch (etherealErr) {
-        logger.warn("Ethereal sandbox unavailable or timed out, using resilient fallback transport", {
-          etherealErr,
-        });
-        transporter = nodemailer.createTransport({
-          jsonTransport: true,
-        });
-      }
-    }
-
     const findingListHtml = findingDetails
       .map(
         (f) => `
@@ -128,6 +83,99 @@ export async function sendSecurityAlertEmail(params: SendAlertParams): Promise<{
       </div>
     `;
 
+    // 1. Check for Resend API key support
+    const resendApiKey = process.env.RESEND_API_KEY;
+    if (resendApiKey) {
+      try {
+        const resendRes = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${resendApiKey.trim()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            from: "SecureShip Security Gate <onboarding@resend.dev>",
+            to: [to],
+            subject,
+            html,
+          }),
+        });
+        if (resendRes.ok) {
+          const resendData = (await resendRes.json()) as { id?: string };
+          logger.info("Alert email delivered via Resend API", { to, id: resendData.id });
+          return {
+            ok: true,
+            messageId: resendData.id,
+            isRealDelivery: true,
+          };
+        }
+      } catch (resendErr) {
+        logger.warn("Resend API delivery failed, falling back to SMTP", { resendErr });
+      }
+    }
+
+    // 2. Resolve SMTP credentials (from payload, environment variables, or Gmail defaults)
+    const host = params.smtpConfig?.host || process.env.SMTP_HOST || "smtp.gmail.com";
+    const port = params.smtpConfig?.port || Number(process.env.SMTP_PORT) || 465;
+    const user = params.smtpConfig?.user || process.env.SMTP_USER || process.env.GMAIL_USER;
+    const rawPass = params.smtpConfig?.pass || process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD;
+    const pass = rawPass ? rawPass.trim().replace(/\s+/g, "") : undefined; // Strip Google spaces (xxxx xxxx xxxx xxxx)
+    const from =
+      params.smtpConfig?.from ||
+      process.env.SMTP_FROM ||
+      (user ? `"SecureShip Security Gate" <${user}>` : `"SecureShip Security Gate" <alerts@secureship.local>`);
+
+    let transporter: Transporter;
+    const isRealDelivery = Boolean(user && pass);
+
+    if (isRealDelivery) {
+      if (host.includes("gmail") || user?.endsWith("@gmail.com")) {
+        // Use optimized Gmail service preset with SSL
+        transporter = nodemailer.createTransport({
+          service: "gmail",
+          auth: { user, pass },
+        });
+      } else {
+        transporter = nodemailer.createTransport({
+          host,
+          port,
+          secure: port === 465,
+          auth: { user, pass },
+          tls: { rejectUnauthorized: false },
+        });
+      }
+      logger.info("Dispatching alert email to real inbox via SMTP", { host, user, to });
+    } else {
+      // Create ephemeral Ethereal test account if no live SMTP is set up
+      try {
+        const testAccount = await Promise.race([
+          nodemailer.createTestAccount(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("Ethereal test account timeout")), 4000)
+          ),
+        ]);
+        transporter = nodemailer.createTransport({
+          host: "smtp.ethereal.email",
+          port: 587,
+          secure: false,
+          auth: {
+            user: testAccount.user,
+            pass: testAccount.pass,
+          },
+        });
+        logger.info("Using ephemeral Ethereal SMTP for alert delivery", { user: testAccount.user });
+      } catch (etherealErr) {
+        logger.warn("Ethereal sandbox unavailable or timed out, using resilient fallback transport", {
+          etherealErr,
+        });
+        transporter = nodemailer.createTransport({
+          jsonTransport: true,
+        });
+      }
+    }
+
+
+
     const info = await transporter.sendMail({
       from,
       to,
@@ -146,7 +194,10 @@ export async function sendSecurityAlertEmail(params: SendAlertParams): Promise<{
       ok: true,
       messageId: info.messageId,
       previewUrl,
-      isRealDelivery: Boolean(host && user && pass),
+      isRealDelivery,
+      error: isRealDelivery
+        ? undefined
+        : "Captured in sandbox test account. To receive real emails in your personal inbox, provide your 16-character Google App Password in Configuration or SMTP_PASS in .env.",
     };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
