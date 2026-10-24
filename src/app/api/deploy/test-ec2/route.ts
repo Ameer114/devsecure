@@ -7,7 +7,22 @@ const execFileAsync = promisify(execFile);
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const host = body.ec2Host?.trim();
+    let host = body.ec2Host?.trim();
+    if (!host) {
+      return Response.json(
+        { ok: false, error: "Please enter an EC2 Host Public IP / DNS." },
+        { status: 400 }
+      );
+    }
+    // Auto-extract valid IPv4 address if user accidentally copy-pasted concatenated AWS console columns
+    const ipMatch = host.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+    if (ipMatch) {
+      host = ipMatch[1];
+    } else {
+      const dnsMatch = host.match(/(ec2-[\d-]+\.compute-1\.amazonaws\.com)/);
+      if (dnsMatch) host = dnsMatch[1];
+    }
+
     let user = body.ec2User?.trim() || "ec2-user";
     if (/^(linux\/unix|linux|unix)$/i.test(user)) {
       user = "ec2-user";
@@ -15,13 +30,6 @@ export async function POST(req: Request) {
 
     let keyPath = body.ec2KeyPath?.trim() || "";
     keyPath = keyPath.replace(/^["']+|["']+$/g, "");
-
-    if (!host) {
-      return Response.json(
-        { ok: false, error: "Please enter an EC2 Host Public IP / DNS." },
-        { status: 400 }
-      );
-    }
 
     if (keyPath && !fs.existsSync(keyPath)) {
       return Response.json(

@@ -47,7 +47,14 @@ export async function triggerCloudDeployment(params: {
       statusMessage = "AWS EC2 Host IP is not configured. Go to Configuration page and enter your EC2 Public IPv4 address.";
       deployDetails = statusMessage;
     } else {
-      const host = config.ec2Host.trim();
+      let host = config.ec2Host.trim();
+      const ipMatch = host.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+      if (ipMatch) {
+        host = ipMatch[1];
+      } else {
+        const dnsMatch = host.match(/(ec2-[\d-]+\.compute-1\.amazonaws\.com)/);
+        if (dnsMatch) host = dnsMatch[1];
+      }
       let user = config.ec2User?.trim() || "ec2-user";
       // Auto-correct common user error: entering "Linux/UNIX" or "Linux" copied from AWS EC2 console
       if (/^(linux\/unix|linux|unix)$/i.test(user)) {

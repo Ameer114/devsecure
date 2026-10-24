@@ -119,6 +119,18 @@ export default function ConfigurationPage() {
     if (e) e.preventDefault();
     if (typeof window === "undefined") return;
 
+    let cleanHost = ec2Host.trim();
+    const hostIpMatch = cleanHost.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+    if (hostIpMatch) {
+      cleanHost = hostIpMatch[1];
+    } else {
+      const dnsMatch = cleanHost.match(/(ec2-[\d-]+\.compute-1\.amazonaws\.com)/);
+      if (dnsMatch) cleanHost = dnsMatch[1];
+    }
+    if (cleanHost !== ec2Host) {
+      setEc2Host(cleanHost);
+    }
+
     const cleanKeyPath = ec2KeyPath.replace(/^["']+|["']+$/g, "").trim();
     let cleanUser = ec2User.trim() || "ec2-user";
     if (/^(linux\/unix|linux|unix)$/i.test(cleanUser)) {
@@ -140,7 +152,7 @@ export default function ConfigurationPage() {
     localStorage.setItem("secureship_cloud_token", cloudToken.trim());
     localStorage.setItem("secureship_cloud_env", cloudEnv.trim());
 
-    localStorage.setItem("secureship_ec2_host", ec2Host.trim());
+    localStorage.setItem("secureship_ec2_host", cleanHost);
     localStorage.setItem("secureship_ec2_user", cleanUser);
     localStorage.setItem("secureship_ec2_keypath", cleanKeyPath);
     localStorage.setItem("secureship_ec2_appdir", ec2AppDir.trim());
@@ -191,7 +203,18 @@ export default function ConfigurationPage() {
     setIsTestingEc2(true);
     setEc2TestResult(null);
 
-    const cleanHost = ec2Host.trim();
+    let cleanHost = ec2Host.trim();
+    const hostIpMatch = cleanHost.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+    if (hostIpMatch) {
+      cleanHost = hostIpMatch[1];
+    } else {
+      const dnsMatch = cleanHost.match(/(ec2-[\d-]+\.compute-1\.amazonaws\.com)/);
+      if (dnsMatch) cleanHost = dnsMatch[1];
+    }
+    if (cleanHost !== ec2Host) {
+      setEc2Host(cleanHost);
+    }
+
     const cleanKeyPath = ec2KeyPath.replace(/^["']+|["']+$/g, "").trim();
     let cleanUser = ec2User.trim() || "ec2-user";
     if (/^(linux\/unix|linux|unix)$/i.test(cleanUser)) {
@@ -248,6 +271,15 @@ export default function ConfigurationPage() {
     setPipelineResult(null);
     setIsPushing(true);
 
+    let cleanHost = ec2Host.trim();
+    const hostIpMatch = cleanHost.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+    if (hostIpMatch) {
+      cleanHost = hostIpMatch[1];
+    } else {
+      const dnsMatch = cleanHost.match(/(ec2-[\d-]+\.compute-1\.amazonaws\.com)/);
+      if (dnsMatch) cleanHost = dnsMatch[1];
+    }
+
     const cleanKeyPath = ec2KeyPath.replace(/^["']+|["']+$/g, "").trim();
     let cleanUser = ec2User.trim() || "ec2-user";
     if (/^(linux\/unix|linux|unix)$/i.test(cleanUser)) {
@@ -269,7 +301,7 @@ export default function ConfigurationPage() {
             webhookUrl: cloudWebhook.trim() || undefined,
             authToken: cloudToken.trim() || undefined,
             environment: cloudEnv,
-            ec2Host: ec2Host.trim() || undefined,
+            ec2Host: cleanHost || undefined,
             ec2User: cleanUser || undefined,
             ec2KeyPath: cleanKeyPath || undefined,
             ec2AppDir: ec2AppDir.trim() || undefined,
@@ -492,8 +524,15 @@ export default function ConfigurationPage() {
                 <input
                   type="text"
                   value={ec2Host}
-                  onChange={(e) => setEc2Host(e.target.value.trim())}
-                  placeholder="e.g. 54.234.162.213 or ec2-54-234-162-213.compute-1.amazonaws.com"
+                  onChange={(e) => {
+                    let val = e.target.value.trim();
+                    const m = val.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+                    if (m && val.length > 15) {
+                      val = m[1];
+                    }
+                    setEc2Host(val);
+                  }}
+                  placeholder="e.g. 54.147.184.240 or ec2-54-147-184-240.compute-1.amazonaws.com"
                   className="mt-1 block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm font-mono placeholder:text-muted/60"
                 />
                 <p className="mt-1 text-xs text-muted">Found in your AWS EC2 Console under <em>Public IPv4 address</em> or <em>Public IPv4 DNS</em>.</p>
