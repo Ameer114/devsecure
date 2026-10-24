@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CheckCircle2, Cloud, Eye, EyeOff, Folder, FolderGit2, KeyRound, Loader2, Mail, Rocket, Server, ShieldCheck, Terminal, Trash2, UploadCloud } from "lucide-react";
+import { AlertTriangle, Bug, CheckCircle2, Cloud, Download, ExternalLink, Eye, EyeOff, Folder, FolderGit2, KeyRound, Loader2, Mail, Rocket, Server, ShieldAlert, ShieldCheck, Sparkles, Terminal, Trash2, UploadCloud } from "lucide-react";
 import { PageHeader } from "@/components/ui";
 
 export default function ConfigurationPage() {
@@ -42,7 +42,23 @@ export default function ConfigurationPage() {
     deployed?: boolean;
     message: string;
     reasons?: string[];
+    emailAlert?: {
+      sent: boolean;
+      recipient: string;
+      previewUrl?: string;
+    };
+    aiAnalysis?: {
+      explanation?: string;
+      suggestion?: string;
+    };
   } | null>(null);
+
+  // Interactive Demo & Pre-Push Hook state
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [demoStatus, setDemoStatus] = useState<string | null>(null);
+  const [isInstallingHook, setIsInstallingHook] = useState(false);
+  const [hookStatus, setHookStatus] = useState<string | null>(null);
 
   // UI state
   const [showGroqKey, setShowGroqKey] = useState(false);
@@ -266,6 +282,60 @@ export default function ConfigurationPage() {
     }
   }
 
+  async function handleSimulateSecret(action: "inject" | "cleanup") {
+    if (action === "inject") {
+      setIsSimulating(true);
+    } else {
+      setIsCleaning(true);
+    }
+    setDemoStatus(null);
+    try {
+      const res = await fetch("/api/demo/simulate-leak", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          targetFolder: localFolder.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setDemoStatus(data.message);
+      } else {
+        setDemoStatus(`Simulator error: ${data.error || "Failed to update test file"}`);
+      }
+    } catch (err) {
+      setDemoStatus(err instanceof Error ? err.message : "Simulator request failed.");
+    } finally {
+      setIsSimulating(false);
+      setIsCleaning(false);
+    }
+  }
+
+  async function handleInstallHook() {
+    setIsInstallingHook(true);
+    setHookStatus(null);
+    try {
+      const res = await fetch("/api/git/hook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetFolder: localFolder.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) {
+        setHookStatus(data.message);
+      } else {
+        setHookStatus(data.error || "Failed to install git hook");
+      }
+    } catch (err) {
+      setHookStatus(err instanceof Error ? err.message : "Hook installation request failed.");
+    } finally {
+      setIsInstallingHook(false);
+    }
+  }
+
   async function handleRunPipeline(e: React.FormEvent) {
     e.preventDefault();
     setPipelineResult(null);
@@ -296,6 +366,8 @@ export default function ConfigurationPage() {
           localFolderPath: localFolder.trim() || undefined,
           branch: branch.trim() || "main",
           commitMessage: commitMessage.trim(),
+          alertEmail: mailId.trim() || undefined,
+          groqApiKey: groqKey.trim() || undefined,
           cloudConfig: {
             provider: cloudProvider,
             webhookUrl: cloudWebhook.trim() || undefined,
@@ -319,6 +391,8 @@ export default function ConfigurationPage() {
           blocked: true,
           message: data.message,
           reasons: data.reasons,
+          emailAlert: data.emailAlert,
+          aiAnalysis: data.aiAnalysis,
         });
       } else if (!res.ok || !data.ok) {
         throw new Error(data.error || "Failed to complete CI/CD pipeline.");
@@ -327,6 +401,7 @@ export default function ConfigurationPage() {
           ok: true,
           deployed: data.deployed,
           message: data.message,
+          emailAlert: data.emailAlert,
         });
       }
 
@@ -729,6 +804,93 @@ export default function ConfigurationPage() {
         </div>
       </section>
 
+      {/* Interactive Security Gate Demo & Pre-Push Hook */}
+      <section className="rounded-xl border border-line bg-surface/50 p-6 space-y-4">
+        <div className="flex items-center justify-between border-b border-line pb-3">
+          <div className="flex items-center gap-2">
+            <ShieldAlert className="size-5 text-accent" />
+            <div>
+              <h2 className="text-base font-semibold">Interactive Security Gate Demo & Developer Hooks</h2>
+              <p className="text-xs text-muted">
+                Test the zero-secret release gate in 1 click, or install the developer pre-push hook.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          {/* 1-Click Secret Simulator */}
+          <div className="rounded-lg border border-line bg-bg p-4 space-y-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted flex items-center gap-1.5">
+              <Bug className="size-3.5 text-bad" />
+              1. Security Release Gate Simulator
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              Injects a mock AWS Access Key into a temporary test file. Run the pipeline to watch SecureShip block the push and keep AWS safe!
+            </p>
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => handleSimulateSecret("inject")}
+                disabled={isSimulating || isCleaning}
+                className="inline-flex items-center gap-1.5 rounded-md border border-bad/40 bg-bad/10 px-3 py-1.5 text-xs font-medium text-bad hover:bg-bad/20 disabled:opacity-50 cursor-pointer"
+              >
+                {isSimulating ? <Loader2 className="size-3.5 animate-spin" /> : <Bug className="size-3.5" />}
+                Inject Test Leaked Secret
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSimulateSecret("cleanup")}
+                disabled={isSimulating || isCleaning}
+                className="inline-flex items-center gap-1.5 rounded-md border border-ok/40 bg-ok/10 px-3 py-1.5 text-xs font-medium text-ok hover:bg-ok/20 disabled:opacity-50 cursor-pointer"
+              >
+                {isCleaning ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5" />}
+                Clean Up Test Secret
+              </button>
+            </div>
+            {demoStatus && (
+              <div className="mt-2 rounded bg-surface p-2.5 text-xs text-ink font-mono border border-line">
+                {demoStatus}
+              </div>
+            )}
+          </div>
+
+          {/* Pre-Push Hook Installer */}
+          <div className="rounded-lg border border-line bg-bg p-4 space-y-3">
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted flex items-center gap-1.5">
+              <Terminal className="size-3.5 text-accent" />
+              2. Developer Pre-Push Hook
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              Install a <code className="text-accent font-mono">.git/hooks/pre-push</code> script so anyone running <code className="text-accent font-mono">git push</code> on this machine is checked before pushing.
+            </p>
+            <div className="flex flex-wrap gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleInstallHook}
+                disabled={isInstallingHook}
+                className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-bg hover:opacity-90 disabled:opacity-50 cursor-pointer"
+              >
+                {isInstallingHook ? <Loader2 className="size-3.5 animate-spin" /> : <Download className="size-3.5" />}
+                Install Pre-Push Guard Hook
+              </button>
+              <a
+                href="/api/git/hook"
+                download="pre-push"
+                className="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-xs text-muted hover:text-ink cursor-pointer"
+              >
+                Download Script
+              </a>
+            </div>
+            {hookStatus && (
+              <div className="mt-2 rounded bg-surface p-2.5 text-xs text-ok font-mono border border-ok/30">
+                {hookStatus}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
       {/* CI/CD Pipeline Execution Section */}
       <section className="rounded-xl border border-line bg-surface/50 p-6 space-y-5">
         <div className="flex items-center gap-2 border-b border-line pb-3">
@@ -779,7 +941,7 @@ export default function ConfigurationPage() {
 
           {pipelineResult && (
             <div
-              className={`rounded-lg border p-4 text-sm ${
+              className={`rounded-lg border p-4 text-sm space-y-3 ${
                 pipelineResult.ok
                   ? "border-ok/30 bg-ok/10 text-ok"
                   : pipelineResult.blocked
@@ -794,9 +956,44 @@ export default function ConfigurationPage() {
                   <span>🛑 Release Gate Held / Pipeline Blocked</span>
                 )}
               </div>
-              <p className="mt-1">{pipelineResult.message}</p>
+              <p>{pipelineResult.message}</p>
+
+              {pipelineResult.emailAlert && (
+                <div className="rounded border border-ink/10 bg-surface/80 p-2.5 text-xs text-ink flex items-center justify-between">
+                  <span>
+                    📧 <strong>Alert Email:</strong> {pipelineResult.emailAlert.sent ? "Sent successfully" : "Queued"} to{" "}
+                    <code>{pipelineResult.emailAlert.recipient}</code>
+                  </span>
+                  {pipelineResult.emailAlert.previewUrl && (
+                    <a
+                      href={pipelineResult.emailAlert.previewUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-accent hover:underline font-medium"
+                    >
+                      View Email Preview <ExternalLink className="size-3" />
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {pipelineResult.aiAnalysis?.explanation && (
+                <div className="rounded border border-accent/20 bg-accent/5 p-3 text-xs text-ink space-y-1">
+                  <div className="font-semibold text-accent flex items-center gap-1.5">
+                    <Sparkles className="size-3.5" />
+                    AI Security Remediation (Groq Llama 3.3)
+                  </div>
+                  <p className="text-muted">{pipelineResult.aiAnalysis.explanation}</p>
+                  {pipelineResult.aiAnalysis.suggestion && (
+                    <p className="font-medium text-ink">
+                      <strong>Fix:</strong> {pipelineResult.aiAnalysis.suggestion}
+                    </p>
+                  )}
+                </div>
+              )}
+
               {pipelineResult.reasons && pipelineResult.reasons.length > 0 && (
-                <ul className="mt-2 list-disc pl-5 text-xs space-y-1">
+                <ul className="list-disc pl-5 text-xs space-y-1">
                   {pipelineResult.reasons.map((r, i) => (
                     <li key={i}>{r}</li>
                   ))}

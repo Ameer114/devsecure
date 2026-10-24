@@ -8,6 +8,8 @@ import type { PolicyDecisionRecord } from "@/lib/types";
 import { recordAudit } from "@/services/audit";
 import { triggerCloudDeployment, type CloudDeployConfig } from "@/services/deploy";
 import { runSecurityScan } from "@/services/scanner";
+import { sendSecurityAlertEmail } from "@/services/email";
+import { generateFindingExplanation } from "@/services/ai";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,6 +20,15 @@ interface PushPayload {
   commitMessage?: string;
   repoFullName?: string;
   cloudConfig?: CloudDeployConfig;
+  alertEmail?: string;
+  groqApiKey?: string;
+  smtpConfig?: {
+    host?: string;
+    port?: number;
+    user?: string;
+    pass?: string;
+    from?: string;
+  };
 }
 
 function parseOwnerAndRepo(url: string): { owner: string; repo: string } | null {
@@ -181,17 +192,52 @@ export async function POST(req: Request) {
     };
     store.policyDecisions.unshift(decision);
 
-    // If gate is blocked, queue alert notification and STOP deployment!
+    // If gate is blocked, queue & dispatch alert notification and STOP deployment!
     if (isGateBlocked) {
+      const recipientEmail = body.alertEmail?.trim() || repo.owner.email || "developer@local";
+      const notifId = `notif_${Date.now()}`;
+
+      // Automatically generate AI explanation using Groq if key is available
+      let aiAnalysis: { explanation?: string; suggestion?: string } = {};
+      if (blockingFindings[0]) {
+        try {
+          aiAnalysis = await generateFindingExplanation(blockingFindings[0], body.groqApiKey);
+          blockingFindings[0].aiExplanation = aiAnalysis.explanation;
+          blockingFindings[0].aiSuggestion = aiAnalysis.suggestion;
+        } catch (aiErr) {
+          logger.warn("Auto AI explanation skipped during gate blockage", { aiErr });
+        }
+      }
+
+      // Dispatch real email alert
+      const emailResult = await sendSecurityAlertEmail({
+        to: recipientEmail,
+        subject: `[SecureShip ALERT] Release gate BLOCKED for ${repo.fullName}`,
+        repoFullName: repo.fullName,
+        commitSha,
+        branch,
+        findingDetails: blockingFindings.map((f) => ({
+          ruleId: f.ruleId,
+          title: f.title,
+          filePath: f.filePath,
+          startLine: f.startLine,
+          severity: f.severity,
+        })),
+        aiExplanation: aiAnalysis.explanation,
+        aiSuggestion: aiAnalysis.suggestion,
+        smtpConfig: body.smtpConfig,
+      });
+
       store.notifications.unshift({
-        id: `notif_${Date.now()}`,
+        id: notifId,
         repositoryId: repo.id,
         runId: run.id,
         findingId: blockingFindings[0]?.id || null,
         channel: "EMAIL",
-        recipient: repo.owner.email,
+        recipient: recipientEmail,
         subject: `[SecureShip ALERT] Release gate BLOCKED for ${repo.fullName}`,
-        status: "QUEUED",
+        status: emailResult.ok ? "SENT" : "FAILED",
+        error: emailResult.error,
         createdAt: new Date(),
         repository: { fullName: repo.fullName, isDemo: false },
       });
@@ -206,6 +252,8 @@ export async function POST(req: Request) {
           commitSha: commitSha.slice(0, 7),
           findingsCount: scanFindings.length,
           reasons,
+          alertEmailSent: emailResult.ok,
+          previewUrl: emailResult.previewUrl || undefined,
         },
       });
 
@@ -215,7 +263,13 @@ export async function POST(req: Request) {
         commitSha: commitSha.slice(0, 7),
         findingsCount: scanFindings.length,
         reasons,
-        message: `Security Release Gate HELD! ${scanFindings.length} security finding(s) detected. Cloud deployment halted.`,
+        emailAlert: {
+          sent: emailResult.ok,
+          recipient: recipientEmail,
+          previewUrl: emailResult.previewUrl || undefined,
+        },
+        aiAnalysis: aiAnalysis.explanation ? aiAnalysis : undefined,
+        message: `Security Release Gate HELD! ${scanFindings.length} security finding(s) detected. Cloud deployment halted. Alert email ${emailResult.ok ? "sent" : "queued"} to ${recipientEmail}.`,
       });
     }
 
